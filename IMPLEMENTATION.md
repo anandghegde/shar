@@ -70,7 +70,7 @@ Verification:
 - [x] CLI test: `shar watch` saves a profile and dedupes on a second call.
 - [x] Run `npm test` (14 tests passing).
 
-Known issue (deferred): `store.checksumPath` walks directories without symlink-loop protection. Exposed when the default agent registry was scanned against a real `~/.codex` containing recursive symlinks. Not in Step 2 scope; track for Step 3 or its own follow-up.
+Note: `store.checksumPath` originally walked directories using `stat`, which crashed on recursive symlinks under `~/.codex`. Fixed in Step 3 follow-up by switching to `lstat` and hashing symlinks by their target string without recursing.
 
 ## Step 3: Daemon Lifecycle
 
@@ -90,7 +90,7 @@ Implementation notes:
 - `getStatus` clears stale pid files transparently.
 - `getStatus` / `start` / `stop` accept `checkAlive`, `spawnWorker`, and `signalProcess` injection points so the bulk of testing avoids real subprocesses.
 - Worker poll interval is `SHARD_INTERVAL_MS` (default 30s).
-- The worker currently only writes heartbeats. Wiring `scanCredentialPaths` into the loop is deferred until the symlink-walk bug in `store.checksumPath` is addressed (otherwise the daemon would crash on first scan against a real home directory).
+- The worker scans configured credential paths each interval via `scanCredentialPaths` and logs `saved` / `deduplicated` outcomes to `daemon.log`. Reads `SHAR_AGENT_PATHS` for path overrides so tests can pin credential roots without touching real home credentials.
 - No process-manager dependency.
 
 Verification:
@@ -98,12 +98,8 @@ Verification:
 - [x] Test stale PID cleanup (both via `getStatus` and via `stop`).
 - [x] Tests for start refusing live pid file, replacing stale pid file, and stop signaling a live pid.
 - [x] Real subprocess lifecycle test: `start` -> worker writes log -> `stop` -> process exits, pid file removed.
-- [x] Run `npm test` (28 tests passing).
-
-## Follow-ups (not yet scheduled)
-
-- `src/store.js` `checksumPath` walks directories using `stat` (follows symlinks) and has no cycle detection. Exposed by `~/.codex/.tmp/marketplaces/.../plugins/...` recursive symlinks. Fix with `lstat` + a visited-inode set before integrating the watcher loop into the daemon worker.
-- Wire `scanCredentialPaths` into `src/daemon-worker.js` once the above is fixed.
+- [x] Worker scan test: spawned worker picks up a written credential file and saves a profile.
+- [x] Run `npm test` (30 tests passing).
 
 ## Step 4: CLI Completion for Phase 1
 

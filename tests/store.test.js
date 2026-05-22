@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -95,6 +95,25 @@ test("restoreProfile copies saved snapshots to configured agent destinations", a
   assert.deepEqual(result.restoredAgents, ["claude"]);
   assert.equal(await readFile(join(destinationDir, "credentials.json"), "utf8"), "{\"account\":\"work\"}");
   assert.equal(await store.getActive("claude"), "work");
+});
+
+test("saveSnapshot handles recursive symlinks without hanging", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source-claude");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), JSON.stringify({ account: "work" }));
+  await symlink(".", join(sourceDir, "loop"));
+
+  const store = createStore({ configDir });
+
+  const result = await store.saveSnapshot({
+    agent: "claude",
+    profile: "work",
+    sourcePath: sourceDir
+  });
+
+  assert.equal(result.created, true);
+  assert.match(result.checksum, /^[a-f0-9]{64}$/);
 });
 
 test("restoreProfile backs up an existing destination before copying credentials", async () => {

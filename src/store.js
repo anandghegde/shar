@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   cp,
+  lstat,
   mkdir,
   readFile,
   readdir,
+  readlink,
   rm,
   stat,
   writeFile
@@ -211,7 +213,12 @@ async function checksumPath(path) {
 }
 
 async function updateHash(hash, path, label) {
-  const info = await stat(path);
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) {
+    const target = await readlink(path);
+    hash.update(`link:${label}\0${target}\0`);
+    return;
+  }
   if (info.isDirectory()) {
     hash.update(`dir:${label}\0`);
     const entries = await readdir(path);

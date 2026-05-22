@@ -1,10 +1,11 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp } from "node:fs/promises";
 import { setTimeout as wait } from "node:timers/promises";
+import { spawn } from "node:child_process";
 
 import { getStatus, isProcessAlive, start, stop } from "../src/daemon.js";
 
@@ -132,6 +133,44 @@ test("stop cleans up a stale pid file without signaling", async () => {
   assert.deepEqual(result, { stopped: true, pid: 6666, alive: false });
   assert.deepEqual(signaled, []);
   assert.equal(await exists(join(configDir, "daemon.pid")), false);
+});
+
+test("daemon worker scans credential paths and saves a profile", async () => {
+  const configDir = await makeTempRoot();
+  const credentialDir = await makeTempRoot();
+  await writeFile(join(credentialDir, "creds.json"), "test");
+
+  const workerPath = new URL("../src/daemon-worker.js", import.meta.url).pathname;
+  const child = spawn(process.execPath, [workerPath, configDir], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      SHARD_INTERVAL_MS: "50",
+      SHAR_AGENT_PATHS: JSON.stringify({ claude: credentialDir })
+    }
+  });
+  child.unref();
+
+  try {
+    let profiles = [];
+    for (let i = 0; i < 40; i++) {
+      try {
+        profiles = await readdir(join(configDir, "profiles"));
+      } catch { /* not yet */ }
+      if (profiles.length > 0) break;
+      await wait(50);
+    }
+    assert.ok(profiles.length >= 1, `expected at least 1 profile, got ${profiles.length}`);
+    const claudeSnapshot = join(configDir, "profiles", profiles[0], "claude", "creds.json");
+    assert.equal(await readFile(claudeSnapshot, "utf8"), "test");
+  } finally {
+    child.kill("SIGTERM");
+    for (let i = 0; i < 40; i++) {
+      if (!isProcessAlive(child.pid)) break;
+      await wait(50);
+    }
+  }
 });
 
 test("start then stop spawns a real worker that exits on SIGTERM", async () => {
