@@ -1,0 +1,16 @@
+{
+  "name": "shar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "shar": "./bin/shar",
+    "shard": "./bin/shard"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
