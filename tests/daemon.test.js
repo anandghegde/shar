@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { mkdtemp } from "node:fs/promises";
 import { setTimeout as wait } from "node:timers/promises";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 
 import { getStatus, isProcessAlive, start, stop } from "../src/daemon.js";
+import { createStore } from "../src/store.js";
 
 async function makeTempRoot() {
   return mkdtemp(join(tmpdir(), "shar-daemon-test-"));
@@ -178,6 +180,76 @@ test("daemon worker scans credential paths and saves a profile", async () => {
       if (!isProcessAlive(child.pid)) break;
       await wait(50);
     }
+  }
+});
+
+test("daemon worker polls quotas when SHARD_QUOTA_INTERVAL_MS is set", async () => {
+  const configDir = await makeTempRoot();
+
+  const sourceFile = join(configDir, "codebuff-src.json");
+  await writeFile(
+    sourceFile,
+    JSON.stringify({ default: "alice", ".user": { alice: { authToken: "tok-xyz" } } })
+  );
+  const seedStore = createStore({
+    configDir,
+    agents: { codebuff: { credentialPath: join(configDir, "codebuff-dest.json") } }
+  });
+  await seedStore.saveSnapshot({ agent: "codebuff", profile: "work", sourcePath: sourceFile });
+
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url, auth: req.headers.authorization });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ allowedUsage: 100, used: 45, currentPeriodStart: "2026-05-01" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+
+  const workerPath = new URL("../src/daemon-worker.js", import.meta.url).pathname;
+  const child = spawn(process.execPath, [workerPath, configDir], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      SHARD_INTERVAL_MS: "100000",
+      SHARD_QUOTA_INTERVAL_MS: "50",
+      SHAR_CODEBUFF_URL: `http://127.0.0.1:${port}/api/user/subscription`,
+      SHAR_AGENT_PATHS: JSON.stringify({
+        claude: join(configDir, "missing-claude"),
+        codex: join(configDir, "missing-codex"),
+        gh: join(configDir, "missing-gh"),
+        opencode: join(configDir, "missing-opencode"),
+        gemini: join(configDir, "missing-gemini"),
+        factory: join(configDir, "missing-factory"),
+        codebuff: join(configDir, "codebuff-dest.json")
+      })
+    }
+  });
+  child.unref();
+
+  try {
+    let usage = null;
+    for (let i = 0; i < 40; i++) {
+      try {
+        usage = JSON.parse(
+          await readFile(join(configDir, "usage", "codebuff", "work.json"), "utf8")
+        );
+      } catch { /* not yet */ }
+      if (usage) break;
+      await wait(50);
+    }
+    assert.ok(usage, "expected codebuff usage file to be written");
+    assert.equal(usage.remaining, 55);
+    assert.ok(requests.length > 0, "expected at least one HTTP request");
+    assert.equal(requests[0].auth, "Bearer tok-xyz");
+  } finally {
+    child.kill("SIGTERM");
+    for (let i = 0; i < 40; i++) {
+      if (!isProcessAlive(child.pid)) break;
+      await wait(50);
+    }
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-const SUBSCRIPTION_URL = "https://www.codebuff.com/api/user/subscription";
+const DEFAULT_SUBSCRIPTION_URL = "https://www.codebuff.com/api/user/subscription";
 
 export async function codebuffPoller({ snapshotPath, fetcher = fetch } = {}) {
   if (!snapshotPath) throw new Error("codebuffPoller requires snapshotPath");
@@ -10,7 +10,8 @@ export async function codebuffPoller({ snapshotPath, fetcher = fetch } = {}) {
   const token = creds?.[".user"]?.[username]?.authToken;
   if (!token) throw new Error("codebuff credentials missing authToken for default user");
 
-  const response = await fetcher(SUBSCRIPTION_URL, {
+  const url = process.env.SHAR_CODEBUFF_URL ?? DEFAULT_SUBSCRIPTION_URL;
+  const response = await fetcher(url, {
     headers: { Authorization: `Bearer ${token}` }
   });
   if (!response.ok) {

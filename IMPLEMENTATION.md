@@ -177,6 +177,28 @@ Verification:
 - [x] CLI tests: `shar usage` placeholder + populated display, `shar usage refresh` reports `unsupported` for agents without a poller and `no profiles` when codebuff has nothing to poll.
 - [x] Run `npm test` (45 tests passing).
 
+## Step 8: Daemon-Driven Periodic Quota Polling (Phase 2)
+
+Status: done.
+
+Goal: keep `~/.config/shar/usage/*` fresh in the background without requiring the user to run `shar usage refresh` manually.
+
+Files:
+- Modify: `src/daemon-worker.js` (split scan and quota into independent loops).
+- Modify: `src/pollers/codebuff.js` (allow URL override via `SHAR_CODEBUFF_URL` so tests can target a local HTTP server).
+- Test: `tests/daemon.test.js` (new integration test spawning the worker against a `node:http` mock).
+
+Implementation notes:
+- Disabled by default: `SHARD_QUOTA_INTERVAL_MS` is `0` unless set. Existing daemon tests stay safe because they do not opt in. Operators enable polling by setting the env var on `shard start`.
+- The worker now runs two independent `while (true)` loops (`scanLoop`, `quotaLoop`) under `Promise.all`. They share the store but progress on their own intervals. A failure in one loop is logged and does not block the other.
+- The codebuff URL is read from `process.env.SHAR_CODEBUFF_URL` at call time, defaulting to the real endpoint. This keeps the production hardcoded URL, but lets tests point at `http://127.0.0.1:<port>`.
+- Daemon log format: `quota refreshed <agent> <profile>` on success, `quota error <agent> <profile>: <message>` on per-profile failure, `quota error: <message>` on dispatcher failure.
+
+Verification:
+- [x] Integration test: stand up a `node:http` mock returning a subscription payload, seed a codebuff snapshot, spawn the worker with `SHARD_QUOTA_INTERVAL_MS=50` and `SHAR_CODEBUFF_URL` pointed at the mock, assert the usage file appears with `remaining` computed correctly and the request carried the expected bearer token.
+- [x] Existing `daemon worker scans credential paths` test continues to pass (no quota interference because the env var stays unset).
+- [x] Run `npm test` (46 tests passing).
+
 ## Step 4: CLI Completion for Phase 1
 
 Status: done.
