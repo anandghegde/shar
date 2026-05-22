@@ -149,6 +149,34 @@ Verification:
 - [x] CLI tests: pin rejects unknown profile, unpin removes file, current reports active+pinned for every registered agent, logs prints tail and placeholder.
 - [x] Run `npm test` (36 tests passing).
 
+## Step 7: Quota Polling Framework (Phase 2)
+
+Status: done (codebuff only).
+
+Goal: build the dispatcher + first real poller so `shar usage` and `shar usage refresh` work end-to-end.
+
+Files:
+- Create: `src/quota.js`
+- Create: `src/pollers/codebuff.js`
+- Modify: `src/store.js` (`writeUsage`, `readUsage`, `listUsage`, persisted under `paths.usage/<agent>/<profile>.json`).
+- Modify: `src/cli.js` (`usage`, `usage refresh` + help text).
+- Test: `tests/quota.test.js`, `tests/cli.test.js`.
+
+Implementation notes:
+- Storage shape is `~/.config/shar/usage/<agent>/<profile>.json` (subdir per agent) because both agent and profile names may contain `-`; a flat naming scheme would be ambiguous. Mode is 0600 for files, 0700 for directories.
+- `pollAllProfiles({ store, agents, pollers, fetcher })` iterates the agent registry, looks up the per-agent poller, then iterates every profile that has a snapshot for that agent. Agents without a poller are reported as `{ supported: false }`; agents with no matching profile are reported as `{ supported: true, profiles: [] }`. Individual poller failures are captured per-result so a single bad profile does not abort the whole run.
+- `codebuffPoller({ snapshotPath, fetcher })` reads the saved `credentials.json`, pulls the `default` user's `authToken` out of `.user`, calls `GET https://www.codebuff.com/api/user/subscription`, and returns `{ allowedUsage, used, remaining, currentPeriodStart, lastChecked }`. Fetcher is injectable so tests never hit the network.
+- CLI: `shar usage` prints per-agent/profile rows from `listUsage`; `shar usage refresh` dispatches `pollAllProfiles` with the real `fetch`. No usage data yet prints `no usage data yet`.
+- Other agents (claude, codex, gh, opencode, gemini, factory) intentionally have no poller yet; each will land as its own follow-up when the corresponding auth flow can be verified against real credentials.
+- Daemon-level periodic polling is a separate follow-up; this step ships the on-demand CLI path only.
+
+Verification:
+- [x] Store tests: `writeUsage`/`readUsage` round-trip, `listUsage` enumerates all agent/profile pairs.
+- [x] Poller test: codebuff parses subscription response, throws on non-ok HTTP.
+- [x] Dispatcher tests: `pollAllProfiles` skips unsupported agents, persists supported ones, captures per-profile errors without aborting.
+- [x] CLI tests: `shar usage` placeholder + populated display, `shar usage refresh` reports `unsupported` for agents without a poller and `no profiles` when codebuff has nothing to poll.
+- [x] Run `npm test` (45 tests passing).
+
 ## Step 4: CLI Completion for Phase 1
 
 Status: done.

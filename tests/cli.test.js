@@ -219,6 +219,36 @@ test("shar logs prints the tail of daemon.log or a placeholder when empty", asyn
   assert.deepEqual(printed, ["2026-05-22 line-2", "2026-05-22 line-3", "2026-05-22 line-4"]);
 });
 
+test("shar usage prints placeholder when no usage data exists", async () => {
+  const configDir = await makeTempRoot();
+  const result = await runShar(["usage"], configDir);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /no usage data yet/);
+});
+
+test("shar usage prints written usage data and refresh reports unsupported agents", async () => {
+  const configDir = await makeTempRoot();
+  await mkdir(join(configDir, "usage", "codebuff"), { recursive: true });
+  await writeFile(
+    join(configDir, "usage", "codebuff", "work.json"),
+    JSON.stringify({
+      allowedUsage: 100,
+      used: 40,
+      remaining: 60,
+      lastChecked: "2026-05-22T12:00:00Z"
+    })
+  );
+
+  const usage = await runShar(["usage"], configDir);
+  assert.equal(usage.status, 0, usage.stderr);
+  assert.match(usage.stdout, /^codebuff\twork\tremaining:60\tallowed:100\tchecked:2026-05-22T12:00:00Z$/m);
+
+  const refresh = await runShar(["usage", "refresh"], configDir);
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.match(refresh.stdout, /^claude\tunsupported$/m);
+  assert.match(refresh.stdout, /^codebuff\tno profiles$/m);
+});
+
 test("shar with an unknown command exits nonzero", async () => {
   const configDir = await makeTempRoot();
   const result = await runShar(["bogus"], configDir);

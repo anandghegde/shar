@@ -165,6 +165,44 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     await rm(join(paths.pins, agent), { force: true });
   }
 
+  async function writeUsage(agent, profile, data) {
+    validateName("agent", agent);
+    validateName("profile", profile);
+    await ensureLayout();
+    const agentDir = join(paths.usage, agent);
+    await mkdir(agentDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(agentDir, `${profile}.json`), `${JSON.stringify(data, null, 2)}\n`, {
+      mode: 0o600
+    });
+  }
+
+  async function readUsage(agent, profile) {
+    validateName("agent", agent);
+    validateName("profile", profile);
+    await ensureLayout();
+    try {
+      return JSON.parse(await readFile(join(paths.usage, agent, `${profile}.json`), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async function listUsage() {
+    await ensureLayout();
+    const agents = (await safeReaddir(paths.usage)).sort();
+    const result = [];
+    for (const agent of agents) {
+      const files = (await safeReaddir(join(paths.usage, agent))).sort();
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        const profile = file.slice(0, -".json".length);
+        result.push({ agent, profile, data: await readUsage(agent, profile) });
+      }
+    }
+    return result;
+  }
+
   async function findSnapshotByChecksum(agent, checksum) {
     const profiles = await listProfiles();
     for (const item of profiles) {
@@ -232,7 +270,10 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     getActive,
     setPin,
     getPin,
-    unpin
+    unpin,
+    writeUsage,
+    readUsage,
+    listUsage
   };
 }
 

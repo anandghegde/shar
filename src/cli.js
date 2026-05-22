@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { createStore } from "./store.js";
 import { scanCredentialPaths } from "./watcher.js";
 import { getStatus, start as startDaemon, stop as stopDaemon } from "./daemon.js";
+import { pollAllProfiles } from "./quota.js";
 
 const DEFAULT_CONFIG_DIR = join(homedir(), ".config", "shar");
 
@@ -34,6 +35,8 @@ export async function run(args, io = process) {
       return currentCommand(store, io);
     case "logs":
       return logsCommand(store, args.slice(1), io);
+    case "usage":
+      return usageCommand(store, args.slice(1), io);
     case "watch":
       return watchCommand(store, io);
     case "daemon":
@@ -146,6 +149,39 @@ async function logsCommand(store, args, io) {
   for (const line of lines.slice(-limit)) io.stdout.write(`${line}\n`);
 }
 
+async function usageCommand(store, args, io) {
+  const [sub] = args;
+  if (sub === "refresh") {
+    const results = await pollAllProfiles({ store });
+    for (const item of results) {
+      if (item.supported === false) {
+        io.stdout.write(`${item.agent}\tunsupported\n`);
+        continue;
+      }
+      if (item.profiles && item.profiles.length === 0) {
+        io.stdout.write(`${item.agent}\tno profiles\n`);
+        continue;
+      }
+      if (item.ok) io.stdout.write(`${item.agent}\t${item.profile}\trefreshed\n`);
+      else io.stdout.write(`${item.agent}\t${item.profile}\terror\t${item.error}\n`);
+    }
+    return;
+  }
+  if (sub) throw new Error("Usage: shar usage [refresh]");
+
+  const entries = await store.listUsage();
+  if (entries.length === 0) {
+    io.stdout.write("no usage data yet\n");
+    return;
+  }
+  for (const { agent, profile, data } of entries) {
+    const remaining = data?.remaining ?? "-";
+    const allowed = data?.allowedUsage ?? "-";
+    const checked = data?.lastChecked ?? "-";
+    io.stdout.write(`${agent}\t${profile}\tremaining:${remaining}\tallowed:${allowed}\tchecked:${checked}\n`);
+  }
+}
+
 async function watchCommand(store, io) {
   const results = await scanCredentialPaths({ store, agents: store.agents });
   for (const { agent, profile, created } of results) {
@@ -198,6 +234,7 @@ Commands:
   unpin <agent>
   current
   logs [lines]
+  usage [refresh]
   watch
   shard <start|stop|status>
 `;
