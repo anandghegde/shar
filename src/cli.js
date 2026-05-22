@@ -37,6 +37,10 @@ export async function run(args, io = process) {
       return logsCommand(store, args.slice(1), io);
     case "usage":
       return usageCommand(store, args.slice(1), io);
+    case "best":
+      return bestCommand(store, args.slice(1), io);
+    case "auto-switch":
+      return autoSwitchCommand(store, args.slice(1), io);
     case "watch":
       return watchCommand(store, io);
     case "daemon":
@@ -182,6 +186,25 @@ async function usageCommand(store, args, io) {
   }
 }
 
+async function bestCommand(store, args, io) {
+  const [agent] = args;
+  if (!agent) throw new Error("Usage: shar best <agent>");
+
+  const profile = await store.pickBestProfile(agent);
+  if (!profile) throw new Error(`No profile with available quota for ${agent}`);
+  io.stdout.write(`${profile}\n`);
+}
+
+async function autoSwitchCommand(store, args, io) {
+  const [agent] = args;
+  if (!agent) throw new Error("Usage: shar auto-switch <agent>");
+
+  const profile = await store.pickBestProfile(agent);
+  if (!profile) throw new Error(`No profile with available quota for ${agent}`);
+  await store.restoreAgent(agent, profile);
+  io.stdout.write(`switched ${agent} to ${profile}\n`);
+}
+
 async function watchCommand(store, io) {
   const results = await scanCredentialPaths({ store, agents: store.agents });
   for (const { agent, profile, created } of results) {
@@ -235,6 +258,8 @@ Commands:
   current
   logs [lines]
   usage [refresh]
+  best <agent>
+  auto-switch <agent>
   watch
   shard <start|stop|status>
 `;

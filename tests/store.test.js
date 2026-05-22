@@ -177,6 +177,94 @@ test("saveSnapshot handles recursive symlinks without hanging", async () => {
   assert.match(result.checksum, /^[a-f0-9]{64}$/);
 });
 
+test("pickBestProfile returns the pinned profile when one is set", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "src");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  const store = createStore({ configDir });
+  await store.saveSnapshot({ agent: "claude", profile: "work", sourcePath: sourceDir });
+  await store.saveSnapshot({ agent: "claude", profile: "personal", sourcePath: sourceDir });
+  await store.writeUsage("claude", "work", { remaining: 10 });
+  await store.writeUsage("claude", "personal", { remaining: 999 });
+  await store.setPin("claude", "work");
+
+  assert.equal(await store.pickBestProfile("claude"), "work");
+});
+
+test("pickBestProfile picks the profile with the largest remaining quota", async () => {
+  const configDir = await makeTempRoot();
+  const store = createStore({ configDir });
+
+  await store.writeUsage("codebuff", "a", { remaining: 5 });
+  await store.writeUsage("codebuff", "b", { remaining: 50 });
+  await store.writeUsage("codebuff", "c", { remaining: 20 });
+
+  assert.equal(await store.pickBestProfile("codebuff"), "b");
+});
+
+test("pickBestProfile skips profiles with zero/null remaining and returns null when none qualify", async () => {
+  const configDir = await makeTempRoot();
+  const store = createStore({ configDir });
+
+  await store.writeUsage("codebuff", "exhausted", { remaining: 0 });
+  await store.writeUsage("codebuff", "unknown", { remaining: null });
+
+  assert.equal(await store.pickBestProfile("codebuff"), null);
+});
+
+test("restoreAgent restores only the named agent and sets it active", async () => {
+  const configDir = await makeTempRoot();
+  const claudeSource = join(configDir, "claude-src");
+  const codexSource = join(configDir, "codex-src");
+  const claudeDest = join(configDir, "claude-dest");
+  const codexDest = join(configDir, "codex-dest");
+  await mkdir(claudeSource, { recursive: true });
+  await mkdir(codexSource, { recursive: true });
+  await writeFile(join(claudeSource, "credentials.json"), "claude-data");
+  await writeFile(join(codexSource, "auth.json"), "codex-data");
+
+  const store = createStore({
+    configDir,
+    agents: {
+      claude: { credentialPath: claudeDest },
+      codex: { credentialPath: codexDest }
+    }
+  });
+  await store.saveSnapshot({ agent: "claude", profile: "work", sourcePath: claudeSource });
+  await store.saveSnapshot({ agent: "codex", profile: "work", sourcePath: codexSource });
+
+  const result = await store.restoreAgent("claude", "work");
+  assert.equal(result.agent, "claude");
+  assert.equal(result.profile, "work");
+  assert.equal(await readFile(join(claudeDest, "credentials.json"), "utf8"), "claude-data");
+  assert.equal(await store.getActive("claude"), "work");
+
+  let codexExists = true;
+  try { await readFile(join(codexDest, "auth.json"), "utf8"); } catch { codexExists = false; }
+  assert.equal(codexExists, false);
+  assert.equal(await store.getActive("codex"), null);
+});
+
+test("restoreAgent rejects when the profile has no snapshot for the agent", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "src");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  const store = createStore({
+    configDir,
+    agents: { claude: { credentialPath: join(configDir, "dest") } }
+  });
+  await store.saveSnapshot({ agent: "claude", profile: "work", sourcePath: sourceDir });
+
+  await assert.rejects(
+    () => store.restoreAgent("codex", "work"),
+    /Profile work has no snapshot for agent codex/
+  );
+});
+
 test("restoreProfile backs up an existing destination before copying credentials", async () => {
   const configDir = await makeTempRoot();
   const sourceDir = join(configDir, "source-codex");

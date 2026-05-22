@@ -249,6 +249,51 @@ test("shar usage prints written usage data and refresh reports unsupported agent
   assert.match(refresh.stdout, /^codebuff\tno profiles$/m);
 });
 
+test("shar best prints the profile with the most remaining quota", async () => {
+  const configDir = await makeTempRoot();
+  await mkdir(join(configDir, "usage", "codebuff"), { recursive: true });
+  await writeFile(
+    join(configDir, "usage", "codebuff", "work.json"),
+    JSON.stringify({ remaining: 80 })
+  );
+  await writeFile(
+    join(configDir, "usage", "codebuff", "personal.json"),
+    JSON.stringify({ remaining: 30 })
+  );
+
+  const result = await runShar(["best", "codebuff"], configDir);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "work");
+});
+
+test("shar best exits nonzero when no profile has quota", async () => {
+  const configDir = await makeTempRoot();
+  const result = await runShar(["best", "codebuff"], configDir);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No profile with available quota for codebuff/);
+});
+
+test("shar auto-switch restores the best profile for the agent and sets it active", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "src");
+  const destDir = join(configDir, "dest");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "from-best");
+
+  const env = { SHAR_AGENT_PATHS: JSON.stringify({ claude: destDir }) };
+  await runShar(["save", "claude", "work", sourceDir], configDir, env);
+  await mkdir(join(configDir, "usage", "claude"), { recursive: true });
+  await writeFile(
+    join(configDir, "usage", "claude", "work.json"),
+    JSON.stringify({ remaining: 1000 })
+  );
+
+  const result = await runShar(["auto-switch", "claude"], configDir, env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /switched claude to work/);
+  assert.equal(await readFile(join(destDir, "credentials.json"), "utf8"), "from-best");
+});
+
 test("shar with an unknown command exits nonzero", async () => {
   const configDir = await makeTempRoot();
   const result = await runShar(["bogus"], configDir);

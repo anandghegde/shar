@@ -188,6 +188,45 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     }
   }
 
+  async function pickBestProfile(agent) {
+    validateName("agent", agent);
+    await ensureLayout();
+
+    const pinned = await getPin(agent);
+    if (pinned) return pinned;
+
+    const files = await safeReaddir(join(paths.usage, agent));
+    let best = null;
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const profile = file.slice(0, -".json".length);
+      const data = await readUsage(agent, profile);
+      const remaining = data?.remaining;
+      if (remaining == null || remaining <= 0) continue;
+      if (!best || remaining > best.remaining) best = { profile, remaining };
+    }
+    return best?.profile ?? null;
+  }
+
+  async function restoreAgent(agent, profile) {
+    validateName("agent", agent);
+    validateName("profile", profile);
+    await ensureLayout();
+
+    const destination = agentRegistry[agent]?.credentialPath;
+    if (!destination) throw new Error(`No credential path configured for agent: ${agent}`);
+
+    const source = join(paths.profiles, profile, agent);
+    if (!(await exists(source))) {
+      throw new Error(`Profile ${profile} has no snapshot for agent ${agent}`);
+    }
+
+    const backupId = makeBackupId();
+    await restoreAgentSnapshot({ agent, backupId, destination, source, profile });
+    await setActive(agent, profile);
+    return { agent, profile, backupId };
+  }
+
   async function listUsage() {
     await ensureLayout();
     const agents = (await safeReaddir(paths.usage)).sort();
@@ -273,7 +312,9 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     unpin,
     writeUsage,
     readUsage,
-    listUsage
+    listUsage,
+    pickBestProfile,
+    restoreAgent
   };
 }
 

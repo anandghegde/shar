@@ -199,6 +199,29 @@ Verification:
 - [x] Existing `daemon worker scans credential paths` test continues to pass (no quota interference because the env var stays unset).
 - [x] Run `npm test` (46 tests passing).
 
+## Step 9: Quota-Aware Picker + Auto-Switch (Phase 2)
+
+Status: done.
+
+Goal: deliver the first slice of intelligent switching — pick the profile with the most remaining quota and apply it.
+
+Files:
+- Modify: `src/store.js` (`pickBestProfile`, `restoreAgent`).
+- Modify: `src/cli.js` (`shar best <agent>`, `shar auto-switch <agent>` + help text).
+- Test: `tests/store.test.js`, `tests/cli.test.js`.
+
+Implementation notes:
+- `pickBestProfile(agent)` priority: pin → highest `remaining` from `~/.config/shar/usage/<agent>/*.json` → `null`. Profiles with `remaining` of `null` or `<= 0` are skipped so we never auto-pick an exhausted account.
+- `restoreAgent(agent, profile)` mirrors the per-agent path inside `restoreProfile` (backup → copy → setActive) but only for a single agent. This is what enables intelligent switching: swap one agent without disturbing the others.
+- `shar best <agent>` is read-only and exits non-zero with a clear stderr message when no profile qualifies. Useful in shell scripts: `name=$(shar best codebuff) && shar auto-switch codebuff`.
+- `shar auto-switch <agent>` is the apply path — picks + restores in one call. The 429-driven push mode in PLAN.md will reuse the same helper later.
+- Staleness of `lastChecked` is not yet considered. With daemon polling enabled (Step 8) the data refreshes on its own. Adding a TTL guard is a follow-up.
+
+Verification:
+- [x] Store: pin wins over higher `remaining`; otherwise highest `remaining` wins; zero/null is skipped; `restoreAgent` only touches the named agent and rejects when the snapshot is missing.
+- [x] CLI: `shar best` prints the chosen profile, exits 1 with stderr message when none qualifies; `shar auto-switch` restores the file at the configured destination and sets the active pointer.
+- [x] Run `npm test` (54 tests passing).
+
 ## Step 4: CLI Completion for Phase 1
 
 Status: done.
