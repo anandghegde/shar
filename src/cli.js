@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -25,6 +26,14 @@ export async function run(args, io = process) {
       return switchCommand(store, args.slice(1), io);
     case "forget":
       return forgetCommand(store, args.slice(1), io);
+    case "pin":
+      return pinCommand(store, args.slice(1), io);
+    case "unpin":
+      return unpinCommand(store, args.slice(1), io);
+    case "current":
+      return currentCommand(store, io);
+    case "logs":
+      return logsCommand(store, args.slice(1), io);
     case "watch":
       return watchCommand(store, io);
     case "daemon":
@@ -92,6 +101,51 @@ async function forgetCommand(store, args, io) {
   io.stdout.write(`forgot ${profileName}\n`);
 }
 
+async function pinCommand(store, args, io) {
+  const [agent, profileName] = args;
+  if (!agent || !profileName) throw new Error("Usage: shar pin <agent> <profile>");
+
+  await store.setPin(agent, profileName);
+  io.stdout.write(`pinned ${agent} ${profileName}\n`);
+}
+
+async function unpinCommand(store, args, io) {
+  const [agent] = args;
+  if (!agent) throw new Error("Usage: shar unpin <agent>");
+
+  await store.unpin(agent);
+  io.stdout.write(`unpinned ${agent}\n`);
+}
+
+async function currentCommand(store, io) {
+  const agents = Object.keys(store.agents).sort();
+  for (const agent of agents) {
+    const active = (await store.getActive(agent)) ?? "-";
+    const pinned = (await store.getPin(agent)) ?? "-";
+    io.stdout.write(`${agent}\tactive:${active}\tpinned:${pinned}\n`);
+  }
+}
+
+async function logsCommand(store, args, io) {
+  const limit = Number.parseInt(args[0] ?? "50", 10);
+  if (!Number.isInteger(limit) || limit <= 0) throw new Error("Usage: shar logs [lines]");
+
+  const logPath = join(store.paths.root, "daemon.log");
+  let content;
+  try {
+    content = await readFile(logPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      io.stdout.write("no daemon logs yet\n");
+      return;
+    }
+    throw error;
+  }
+
+  const lines = content.split("\n").filter(Boolean);
+  for (const line of lines.slice(-limit)) io.stdout.write(`${line}\n`);
+}
+
 async function watchCommand(store, io) {
   const results = await scanCredentialPaths({ store, agents: store.agents });
   for (const { agent, profile, created } of results) {
@@ -140,6 +194,10 @@ Commands:
   show <profile>
   switch <profile>
   forget <profile>
+  pin <agent> <profile>
+  unpin <agent>
+  current
+  logs [lines]
   watch
   shard <start|stop|status>
 `;

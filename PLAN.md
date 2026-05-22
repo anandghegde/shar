@@ -213,8 +213,8 @@ Examples:
 - [x] Add the first automated tests around profile persistence and detection
 - [x] Implement basic CLI command plumbing: `save`, `list`, `show`, `switch`, `forget`, `shard status`
 - [x] Implement credential restore on `switch` with backup and atomic copy semantics
-- [ ] Implement file watching for credential directories and profile auto-save
-- [ ] Implement daemon lifecycle commands: start, stop, status
+- [x] Implement file watching for credential directories and profile auto-save
+- [x] Implement daemon lifecycle commands: start, stop, status
 
 ### Handoff notes
 - Initial Node.js scaffold and core store tests are in place. See `IMPLEMENTATION.md` for continuation steps.

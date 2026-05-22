@@ -137,6 +137,84 @@ test("shar switch on a missing profile exits nonzero", async () => {
   assert.match(result.stderr, /Profile not found: ghost/);
 });
 
+test("shar pin persists agent->profile mapping and rejects unknown profiles", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  await runShar(["save", "claude", "work", sourceDir], configDir);
+
+  const pinResult = await runShar(["pin", "claude", "work"], configDir);
+  assert.equal(pinResult.status, 0, pinResult.stderr);
+  assert.match(pinResult.stdout, /pinned claude work/);
+  assert.equal(
+    (await readFile(join(configDir, "pins", "claude"), "utf8")).trim(),
+    "work"
+  );
+
+  const missing = await runShar(["pin", "claude", "ghost"], configDir);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Profile not found: ghost/);
+});
+
+test("shar unpin removes the pin file", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  await runShar(["save", "claude", "work", sourceDir], configDir);
+  await runShar(["pin", "claude", "work"], configDir);
+
+  const result = await runShar(["unpin", "claude"], configDir);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /unpinned claude/);
+
+  let enoent = false;
+  try {
+    await readFile(join(configDir, "pins", "claude"), "utf8");
+  } catch (error) {
+    enoent = error.code === "ENOENT";
+  }
+  assert.equal(enoent, true);
+});
+
+test("shar current prints active and pinned profile per agent", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source");
+  const destinationDir = join(configDir, "dest");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  const env = { SHAR_AGENT_PATHS: JSON.stringify({ claude: destinationDir }) };
+  await runShar(["save", "claude", "work", sourceDir], configDir, env);
+  await runShar(["switch", "work"], configDir, env);
+  await runShar(["pin", "claude", "work"], configDir, env);
+
+  const result = await runShar(["current"], configDir, env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^claude\tactive:work\tpinned:work$/m);
+  assert.match(result.stdout, /^codex\tactive:-\tpinned:-$/m);
+});
+
+test("shar logs prints the tail of daemon.log or a placeholder when empty", async () => {
+  const configDir = await makeTempRoot();
+  await mkdir(configDir, { recursive: true });
+
+  const empty = await runShar(["logs"], configDir);
+  assert.equal(empty.status, 0);
+  assert.match(empty.stdout, /no daemon logs yet/);
+
+  const lines = Array.from({ length: 5 }, (_, i) => `2026-05-22 line-${i}`).join("\n") + "\n";
+  await writeFile(join(configDir, "daemon.log"), lines);
+
+  const tail = await runShar(["logs", "3"], configDir);
+  assert.equal(tail.status, 0, tail.stderr);
+  const printed = tail.stdout.trim().split("\n");
+  assert.deepEqual(printed, ["2026-05-22 line-2", "2026-05-22 line-3", "2026-05-22 line-4"]);
+});
+
 test("shar with an unknown command exits nonzero", async () => {
   const configDir = await makeTempRoot();
   const result = await runShar(["bogus"], configDir);

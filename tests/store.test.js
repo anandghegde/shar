@@ -97,6 +97,39 @@ test("restoreProfile copies saved snapshots to configured agent destinations", a
   assert.equal(await store.getActive("claude"), "work");
 });
 
+test("setPin rejects unknown profiles and getPin/unpin round-trip the pin", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source-claude");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  const store = createStore({ configDir });
+  await store.saveSnapshot({ agent: "claude", profile: "work", sourcePath: sourceDir });
+
+  await assert.rejects(() => store.setPin("claude", "ghost"), /Profile not found: ghost/);
+
+  await store.setPin("claude", "work");
+  assert.equal(await store.getPin("claude"), "work");
+
+  await store.unpin("claude");
+  assert.equal(await store.getPin("claude"), null);
+});
+
+test("forgetProfile removes pins that reference the forgotten profile", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "source-claude");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "credentials.json"), "{}");
+
+  const store = createStore({ configDir });
+  await store.saveSnapshot({ agent: "claude", profile: "work", sourcePath: sourceDir });
+  await store.setPin("claude", "work");
+
+  await store.forgetProfile("work");
+
+  assert.equal(await store.getPin("claude"), null);
+});
+
 test("saveSnapshot handles recursive symlinks without hanging", async () => {
   const configDir = await makeTempRoot();
   const sourceDir = join(configDir, "source-claude");

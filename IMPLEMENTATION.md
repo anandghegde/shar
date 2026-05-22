@@ -101,6 +101,28 @@ Verification:
 - [x] Worker scan test: spawned worker picks up a written credential file and saves a profile.
 - [x] Run `npm test` (30 tests passing).
 
+## Step 5: Pins and Inspection Commands (Phase 2)
+
+Status: done.
+
+Goal: add `pin`, `unpin`, `current`, `logs` per PLAN.md CLI reference.
+
+Files:
+- Modify: `src/store.js` (pin/unpin helpers, `paths.pins`, pin cleanup on `forgetProfile`).
+- Modify: `src/cli.js` (new commands and help text).
+- Test: `tests/store.test.js`, `tests/cli.test.js`.
+
+Implementation notes:
+- Pins live under `~/.config/shar/pins/<agent>` and contain only the profile name. `setPin` validates the profile exists; `forgetProfile` removes both active pointers and pins that reference the forgotten profile.
+- `current` iterates the agent registry and prints `agent\tactive:<name>\tpinned:<name>` (`-` for unset).
+- `logs` reads `daemon.log` and prints the last N lines (default 50). Missing log prints `no daemon logs yet`.
+- No quota- or switching-aware behavior wired up yet — pins are pure metadata until the intelligent switcher lands.
+
+Verification:
+- [x] Store tests: pin round-trip, pin cleanup on forget.
+- [x] CLI tests: pin rejects unknown profile, unpin removes file, current reports active+pinned for every registered agent, logs prints tail and placeholder.
+- [x] Run `npm test` (36 tests passing).
+
 ## Step 4: CLI Completion for Phase 1
 
 Status: done.
