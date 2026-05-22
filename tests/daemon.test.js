@@ -147,7 +147,15 @@ test("daemon worker scans credential paths and saves a profile", async () => {
     env: {
       ...process.env,
       SHARD_INTERVAL_MS: "50",
-      SHAR_AGENT_PATHS: JSON.stringify({ claude: credentialDir })
+      SHAR_AGENT_PATHS: JSON.stringify({
+        claude: credentialDir,
+        codex: join(configDir, "missing-codex"),
+        gh: join(configDir, "missing-gh"),
+        opencode: join(configDir, "missing-opencode"),
+        gemini: join(configDir, "missing-gemini"),
+        factory: join(configDir, "missing-factory"),
+        codebuff: join(configDir, "missing-codebuff.json")
+      })
     }
   });
   child.unref();

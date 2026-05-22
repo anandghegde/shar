@@ -101,6 +101,32 @@ Verification:
 - [x] Worker scan test: spawned worker picks up a written credential file and saves a profile.
 - [x] Run `npm test` (30 tests passing).
 
+## Step 6: Phase 1b Agents (Phase 2)
+
+Status: opencode, gemini, factory, codebuff done. Aider deferred.
+
+Goal: extend the agent registry beyond the original three (claude, codex, gh).
+
+Files:
+- Modify: `src/agents.js`
+- Modify: `src/store.js` (`listProfileAgents` now surfaces file-based snapshots, not only directories).
+- Test: `tests/store.test.js`
+- Test: `tests/cli.test.js` / `tests/daemon.test.js` (override the new agent paths so tests stay hermetic and never touch real home credentials).
+
+Implementation notes:
+- New default registry entries:
+  - `opencode` -> `~/.config/opencode`
+  - `gemini`   -> `~/.config/gcloud`
+  - `factory`  -> `~/.factory` (snapshots `auth.v2.file` + `auth.v2.key` together)
+  - `codebuff` -> `~/.config/manicode/credentials.json` (single file)
+- `listProfileAgents` previously filtered to directories only, which hid file-based snapshots. Switched to `exists()` so a profile directory containing `codebuff` (a file) is visible to `show` / `restoreProfile`.
+- Aider is deferred: it stores two distinct files at `~/.aider.conf.yml` and `~/.aider.keys`, which needs multi-path agent support that is a bigger refactor of the registry shape.
+
+Verification:
+- [x] Store test for codebuff-style file-path round-trip (`save` -> `show` -> `restoreProfile` -> destination file contents match).
+- [x] Watch CLI test and daemon-worker scan test override every registry agent so the suite never reads real `~/.config/...` paths.
+- [x] Run `npm test` (37 tests passing).
+
 ## Step 5: Pins and Inspection Commands (Phase 2)
 
 Status: done.

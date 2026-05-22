@@ -84,7 +84,11 @@ test("shar watch saves a profile for an existing credential path", async () => {
     SHAR_AGENT_PATHS: JSON.stringify({
       claude: credentialPath,
       codex: join(configDir, "missing-codex"),
-      gh: join(configDir, "missing-gh")
+      gh: join(configDir, "missing-gh"),
+      opencode: join(configDir, "missing-opencode"),
+      gemini: join(configDir, "missing-gemini"),
+      factory: join(configDir, "missing-factory"),
+      codebuff: join(configDir, "missing-codebuff.json")
     })
   };
   const result = await runShar(["watch"], configDir, env);

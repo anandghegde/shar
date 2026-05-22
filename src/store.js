@@ -182,7 +182,7 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     const agents = [];
     for (const entry of entries.sort()) {
       if (entry.startsWith(".")) continue;
-      if (await isDirectory(join(profilePath, entry))) agents.push(entry);
+      if (await exists(join(profilePath, entry))) agents.push(entry);
     }
     return agents;
   }

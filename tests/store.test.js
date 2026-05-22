@@ -97,6 +97,34 @@ test("restoreProfile copies saved snapshots to configured agent destinations", a
   assert.equal(await store.getActive("claude"), "work");
 });
 
+test("file-path agents (e.g. codebuff) round-trip save -> show -> switch -> restore", async () => {
+  const configDir = await makeTempRoot();
+  const sourceFile = join(configDir, "manicode-creds.json");
+  const destinationFile = join(configDir, "dest", "credentials.json");
+  await writeFile(sourceFile, JSON.stringify({ default: "work" }));
+
+  const store = createStore({
+    configDir,
+    agents: { codebuff: { credentialPath: destinationFile } }
+  });
+
+  const saveResult = await store.saveSnapshot({
+    agent: "codebuff",
+    profile: "work",
+    sourcePath: sourceFile
+  });
+  assert.equal(saveResult.created, true);
+
+  const profile = await store.showProfile("work");
+  assert.deepEqual(profile.agents, ["codebuff"]);
+
+  await store.restoreProfile("work");
+  assert.equal(
+    await readFile(destinationFile, "utf8"),
+    JSON.stringify({ default: "work" })
+  );
+});
+
 test("setPin rejects unknown profiles and getPin/unpin round-trip the pin", async () => {
   const configDir = await makeTempRoot();
   const sourceDir = join(configDir, "source-claude");

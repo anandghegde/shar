@@ -4,7 +4,13 @@ import { homedir } from "node:os";
 export const PHASE1_AGENTS = Object.freeze({
   claude: Object.freeze({ credentialPath: join(homedir(), ".claude") }),
   codex: Object.freeze({ credentialPath: join(homedir(), ".codex") }),
-  gh: Object.freeze({ credentialPath: join(homedir(), ".config", "gh") })
+  gh: Object.freeze({ credentialPath: join(homedir(), ".config", "gh") }),
+  opencode: Object.freeze({ credentialPath: join(homedir(), ".config", "opencode") }),
+  gemini: Object.freeze({ credentialPath: join(homedir(), ".config", "gcloud") }),
+  factory: Object.freeze({ credentialPath: join(homedir(), ".factory") }),
+  codebuff: Object.freeze({
+    credentialPath: join(homedir(), ".config", "manicode", "credentials.json")
+  })
 });
 
 export function normalizeAgents(overrides = {}) {
