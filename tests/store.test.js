@@ -1,4 +1,4 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,6 +10,17 @@ import { createStore } from "../src/store.js";
 async function makeTempRoot() {
   return mkdtemp(join(tmpdir(), "shar-test-"));
 }
+
+async function exists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 
 test("ensureLayout creates the expected storage directories", async () => {
   const configDir = await makeTempRoot();
@@ -289,3 +300,45 @@ test("restoreProfile backs up an existing destination before copying credentials
     "old"
   );
 });
+
+test("file-subset agents (e.g. factory) round-trip save -> show -> switch -> restore", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "factory-source");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "auth.v2.file"), "file-content");
+  await writeFile(join(sourceDir, "auth.v2.key"), "key-content");
+  await writeFile(join(sourceDir, "unrelated.txt"), "ignored-content");
+
+  const destinationDir = join(configDir, "dest", "factory");
+  await mkdir(destinationDir, { recursive: true });
+  await writeFile(join(destinationDir, "unrelated.txt"), "original-adjacent-content");
+
+  const store = createStore({
+    configDir,
+    agents: {
+      factory: {
+        credentialPath: destinationDir,
+        files: ["auth.v2.file", "auth.v2.key"]
+      }
+    }
+  });
+
+  const saveResult = await store.saveSnapshot({
+    agent: "factory",
+    profile: "work",
+    sourcePath: sourceDir
+  });
+  assert.equal(saveResult.created, true);
+
+  const snapshotFolder = join(configDir, "profiles", "work", "factory");
+  assert.equal(await exists(join(snapshotFolder, "auth.v2.file")), true);
+  assert.equal(await exists(join(snapshotFolder, "auth.v2.key")), true);
+  assert.equal(await exists(join(snapshotFolder, "unrelated.txt")), false);
+
+  await store.restoreProfile("work");
+
+  assert.equal(await readFile(join(destinationDir, "auth.v2.file"), "utf8"), "file-content");
+  assert.equal(await readFile(join(destinationDir, "auth.v2.key"), "utf8"), "key-content");
+  assert.equal(await readFile(join(destinationDir, "unrelated.txt"), "utf8"), "original-adjacent-content");
+});
+
