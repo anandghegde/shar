@@ -54,7 +54,10 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     validateName("profile", profile);
     await ensureLayout();
 
-    const checksum = await checksumPath(sourcePath);
+    const config = agentRegistry[agent];
+    const files = config?.files;
+
+    const checksum = await checksumPath(sourcePath, files);
     const existing = await findSnapshotByChecksum(agent, checksum);
     if (existing) {
       return { created: false, profile: existing.profile, agent, checksum };
@@ -63,7 +66,19 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     const target = join(paths.profiles, profile, agent);
     await mkdir(join(paths.profiles, profile), { recursive: true, mode: 0o700 });
     await rm(target, { recursive: true, force: true });
-    await cp(sourcePath, target, { recursive: true, preserveTimestamps: true });
+
+    if (files && files.length > 0) {
+      await mkdir(target, { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        const srcFile = join(sourcePath, file);
+        const destFile = join(target, file);
+        if (await exists(srcFile)) {
+          await cp(srcFile, destFile, { recursive: true, preserveTimestamps: true });
+        }
+      }
+    } else {
+      await cp(sourcePath, target, { recursive: true, preserveTimestamps: true });
+    }
     await writeMetadata(profile, agent, { agent, checksum, sourcePath });
 
     return { created: true, profile, agent, checksum };
@@ -110,7 +125,8 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
         backupId,
         destination,
         profile: name,
-        source: join(paths.profiles, name, agent)
+        source: join(paths.profiles, name, agent),
+        files: agentRegistry[agent]?.files
       });
       await setActive(agent, name);
       restoredAgents.push(agent);
@@ -222,7 +238,14 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     }
 
     const backupId = makeBackupId();
-    await restoreAgentSnapshot({ agent, backupId, destination, source, profile });
+    await restoreAgentSnapshot({
+      agent,
+      backupId,
+      destination,
+      source,
+      profile,
+      files: agentRegistry[agent]?.files
+    });
     await setActive(agent, profile);
     return { agent, profile, backupId };
   }
@@ -318,22 +341,55 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
   };
 }
 
-async function restoreAgentSnapshot({ agent, backupId, destination, source, profile }) {
+async function restoreAgentSnapshot({ agent, backupId, destination, source, profile, files }) {
   if (await exists(destination)) {
     const backupPath = join(dirname(source), "..", "..", "backups", backupId, agent);
     await mkdir(dirname(backupPath), { recursive: true, mode: 0o700 });
-    await rm(backupPath, { recursive: true, force: true });
-    await cp(destination, backupPath, { recursive: true, preserveTimestamps: true });
+    if (files && files.length > 0) {
+      await mkdir(backupPath, { recursive: true, mode: 0o700 });
+      for (const file of files) {
+        const destFile = join(destination, file);
+        const backFile = join(backupPath, file);
+        if (await exists(destFile)) {
+          await cp(destFile, backFile, { recursive: true, preserveTimestamps: true });
+        }
+      }
+    } else {
+      await rm(backupPath, { recursive: true, force: true });
+      await cp(destination, backupPath, { recursive: true, preserveTimestamps: true });
+    }
   }
 
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await rm(destination, { recursive: true, force: true });
-  await cp(source, destination, { recursive: true, preserveTimestamps: true });
+
+  if (files && files.length > 0) {
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    for (const file of files) {
+      const srcFile = join(source, file);
+      const destFile = join(destination, file);
+      await rm(destFile, { recursive: true, force: true });
+      if (await exists(srcFile)) {
+        await cp(srcFile, destFile, { recursive: true, preserveTimestamps: true });
+      }
+    }
+  } else {
+    await rm(destination, { recursive: true, force: true });
+    await cp(source, destination, { recursive: true, preserveTimestamps: true });
+  }
 }
 
-async function checksumPath(path) {
+async function checksumPath(path, files) {
   const hash = createHash("sha256");
-  await updateHash(hash, path, "");
+  if (files && files.length > 0) {
+    for (const file of files) {
+      const filePath = join(path, file);
+      if (await exists(filePath)) {
+        await updateHash(hash, filePath, file);
+      }
+    }
+  } else {
+    await updateHash(hash, path, "");
+  }
   return hash.digest("hex");
 }
 
