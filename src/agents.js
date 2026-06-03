@@ -7,7 +7,10 @@ export const PHASE1_AGENTS = Object.freeze({
   gh: Object.freeze({ credentialPath: join(homedir(), ".config", "gh") }),
   opencode: Object.freeze({ credentialPath: join(homedir(), ".config", "opencode") }),
   gemini: Object.freeze({ credentialPath: join(homedir(), ".config", "gcloud") }),
-  factory: Object.freeze({ credentialPath: join(homedir(), ".factory") }),
+  factory: Object.freeze({
+    credentialPath: join(homedir(), ".factory"),
+    files: ["auth.v2.file", "auth.v2.key"]
+  }),
   codebuff: Object.freeze({
     credentialPath: join(homedir(), ".config", "manicode", "credentials.json")
   })
