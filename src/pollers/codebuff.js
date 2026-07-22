@@ -6,8 +6,13 @@ export async function codebuffPoller({ snapshotPath, fetcher = fetch } = {}) {
   if (!snapshotPath) throw new Error("codebuffPoller requires snapshotPath");
 
   const creds = JSON.parse(await readFile(snapshotPath, "utf8"));
-  const username = creds.default;
-  const token = creds?.[".user"]?.[username]?.authToken;
+  let token;
+  if (creds.default && typeof creds.default === "object") {
+    token = creds.default.authToken;
+  } else {
+    const username = creds.default;
+    token = creds?.[".user"]?.[username]?.authToken;
+  }
   if (!token) throw new Error("codebuff credentials missing authToken for default user");
 
   const url = process.env.SHAR_CODEBUFF_URL ?? DEFAULT_SUBSCRIPTION_URL;

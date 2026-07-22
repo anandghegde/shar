@@ -76,6 +76,36 @@ test("codebuffPoller reads token and parses subscription response", async () => 
   assert.match(result.lastChecked, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("codebuffPoller reads token in new credentials structure (object-based default)", async () => {
+  const configDir = await makeTempRoot();
+  const snapshotPath = join(configDir, "credentials.json");
+  await writeFile(
+    snapshotPath,
+    JSON.stringify({
+      default: {
+        authToken: "tok-obj-123"
+      }
+    })
+  );
+
+  let receivedUrl;
+  let receivedHeaders;
+  const fetcher = async (url, init) => {
+    receivedUrl = url;
+    receivedHeaders = init.headers;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { allowedUsage: 100, used: 30 };
+      }
+    };
+  };
+
+  const result = await codebuffPoller({ snapshotPath, fetcher });
+  assert.equal(receivedHeaders.Authorization, "Bearer tok-obj-123");
+});
+
 test("codebuffPoller throws on non-ok response", async () => {
   const configDir = await makeTempRoot();
   const snapshotPath = join(configDir, "credentials.json");
