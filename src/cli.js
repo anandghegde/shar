@@ -8,6 +8,7 @@ import { getStatus, start as startDaemon, stop as stopDaemon } from "./daemon.js
 import { pollAllProfiles } from "./quota.js";
 import { installWrappers, pathExport } from "./wrapper.js";
 import { pickOption } from "./picker.js";
+import { claudeUsageLabels } from "./usage.js";
 import {
   addClaudeProfile,
   launchClaudeProfile,
@@ -405,11 +406,12 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
 
 async function pickCommand(store, io) {
   const profiles = await listClaudeProfiles({ configDir: store.paths.root });
+  const usage = await claudeUsageLabels({ profiles, configDir: store.paths.root });
   const profile = await pickOption({
     title: "Launch Claude Code with:",
     options: profiles.map((candidate) => ({
       name: candidate.name,
-      label: candidate.label,
+      label: [candidate.label, usage.get(candidate.name)].filter(Boolean).join("  "),
       value: candidate
     })),
     input: io.stdin,

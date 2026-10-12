@@ -101,3 +101,19 @@ Notes:
 
 - Links are re-synced on every launch, so new `~/.claude` entries appear automatically. If Claude replaces the linked `settings.json` or `CLAUDE.md` with a real file, shar keeps it as `<name>.shar-conflict` and re-links.
 - `settings.json` is shared, so an account launch refuses to run while `~/.claude/settings.json` overrides subscription auth (for example after `shar switch claude foundry`). Run `shar switch claude subscription` or `shar claude setup` first.
+
+### Usage in the picker
+
+For `subscription` and `account` profiles the picker shows what is left in the 5-hour and 7-day windows and when each resets:
+
+```
+  2) subscription  Personal subscription  5h 77% left ↻2h10m · 7d 59% left ↻3d
+```
+
+How it works, and what to know before relying on it:
+
+- shar reads the profile's OAuth token from the macOS Keychain (`Claude Code-credentials`, or `Claude Code-credentials-<sha256(dir)[:8]>` for accounts) and calls the undocumented `GET api.anthropic.com/api/oauth/usage`, the same data `/usage` shows. macOS may ask once to let `security` read each item.
+- Requests send `User-Agent: claude-code/<installed version>`; without it the endpoint is rate-limited aggressively. Results are cached for 3 minutes in `~/.config/shar/claude/usage/<profile>.json` (`0600`), and a 429 backs off for 5 minutes.
+- Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(login expired, as of 3h ago)`. A window whose reset time has passed is shown as `100% left`.
+- Foundry and claudish options have no subscription window and show nothing.
+- Set `SHAR_CLAUDE_USAGE=0` to turn this off entirely (no Keychain reads, no requests).
