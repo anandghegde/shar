@@ -117,3 +117,17 @@ How it works, and what to know before relying on it:
 - Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(login expired, as of 3h ago)`. A window whose reset time has passed is shown as `100% left`.
 - Foundry and claudish options have no subscription window and show nothing.
 - Set `SHAR_CLAUDE_USAGE=0` to turn this off entirely (no Keychain reads, no requests).
+
+#### Surplus options
+
+claudish profiles whose model spec starts with `surplus` (`surplus@glm-5.3`, `surplus-gpt@gpt-6-astra`) show what you have spent on that model and what it saved against direct provider pricing, from Surplus's documented `GET /v1/buyer/overview` API:
+
+```
+  3) glm    Surplus GLM 5.3      30d $4.18 spent · $145.21 saved (97%)
+  5) astra  Surplus Astra        30d $2.98 spent · $295.55 saved (99%)
+```
+
+- The key is read from `SURPLUS_API_KEY` in the environment; without it nothing is shown. It is only ever sent to `api.surplusintelligence.ai`.
+- One request covers all Surplus options. The result is cached for 5 minutes (`~/.config/shar/claude/usage/surplus-<range>.json`, mode `0600`), with the same 429 backoff and last-known fallback as above.
+- The range is `30d` by default; set `SHAR_SURPLUS_RANGE=7d` for the last week. Surplus only breaks usage down by model for those two ranges.
+- A model with no listed usage in the range shows `no usage listed`. `SHAR_CLAUDE_USAGE=0` disables all of these lookups.

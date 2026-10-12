@@ -9,9 +9,13 @@ import {
   claudeKeychainService,
   claudeUsageLabels,
   fetchOAuthUsage,
+  fetchSurplusOverview,
   formatClaudeUsage,
+  formatSurplusUsage,
   getClaudeUsage,
-  readOAuthCredential
+  getSurplusUsage,
+  readOAuthCredential,
+  surplusModelId
 } from "../src/usage.js";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");
@@ -236,4 +240,152 @@ test("claudeUsageLabels covers subscription and account profiles only and can be
     fetcher: http.fetcher
   });
   assert.equal(off.size, 0);
+});
+
+const SURPLUS_BODY = {
+  coverage: true,
+  by_model: {
+    dimension: "model",
+    top: [
+      {
+        group: "gpt-6-astra",
+        measures: { buyer_cost_micro: 2977178, direct_cost_micro: 298525110, savings_micro: 295547932 }
+      },
+      {
+        group: "glm-5.3",
+        measures: { buyer_cost_micro: 4177929, direct_cost_micro: 149383510, savings_micro: 145205581 }
+      },
+      {
+        group: "glm-5.3-flash",
+        measures: { buyer_cost_micro: 63, direct_cost_micro: 3705, savings_micro: 3642 }
+      }
+    ]
+  }
+};
+
+test("surplusModelId extracts the model from Surplus claudish specs only", () => {
+  assert.equal(surplusModelId("surplus-gpt@gpt-6-astra"), "gpt-6-astra");
+  assert.equal(surplusModelId("surplus@glm-5.3"), "glm-5.3");
+  assert.equal(surplusModelId("surplus@glm-5.3:3"), "glm-5.3");
+  assert.equal(surplusModelId("openrouter@vendor/model"), null);
+  assert.equal(surplusModelId(undefined), null);
+});
+
+test("fetchSurplusOverview authenticates with the key and maps per-model measures", async () => {
+  const http = fakeFetch(200, SURPLUS_BODY);
+  const result = await fetchSurplusOverview({ apiKey: "inf_test", range: "30d", fetcher: http.fetcher });
+
+  assert.equal(http.calls[0].url, "https://api.surplusintelligence.ai/v1/buyer/overview?range=30d");
+  assert.equal(http.calls[0].options.headers.authorization, "Bearer inf_test");
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.models["glm-5.3"], {
+    spent: 4177929,
+    direct: 149383510,
+    saved: 145205581
+  });
+
+  const rejected = await fetchSurplusOverview({ apiKey: "k", range: "7d", fetcher: fakeFetch(401).fetcher });
+  const limited = await fetchSurplusOverview({ apiKey: "k", range: "7d", fetcher: fakeFetch(429).fetcher });
+  const noCoverage = await fetchSurplusOverview({
+    apiKey: "k",
+    range: "7d",
+    fetcher: fakeFetch(200, { coverage: false }).fetcher
+  });
+  assert.equal(rejected.status, "rejected");
+  assert.equal(limited.status, "limited");
+  assert.equal(noCoverage.status, "unavailable");
+});
+
+test("getSurplusUsage caches for five minutes and backs off after a 429", async () => {
+  const configDir = await tempConfigDir();
+  const http = fakeFetch(200, SURPLUS_BODY);
+  const base = { configDir, apiKey: "k", range: "30d", now: NOW, env: {}, fetcher: http.fetcher };
+
+  assert.equal((await getSurplusUsage(base)).status, "ok");
+  await getSurplusUsage({ ...base, now: NOW + 4 * 60_000 });
+  assert.equal(http.calls.length, 1);
+  await getSurplusUsage({ ...base, now: NOW + 6 * 60_000 });
+  assert.equal(http.calls.length, 2);
+  assert.equal((await stat(join(configDir, "claude", "usage", "surplus-30d.json"))).mode & 0o777, 0o600);
+
+  const limited = fakeFetch(429);
+  const later = { ...base, now: NOW + 20 * 60_000, fetcher: limited.fetcher };
+  const first = await getSurplusUsage(later);
+  assert.equal(first.status, "limited");
+  assert.ok(first.models["glm-5.3"]);
+  await getSurplusUsage({ ...later, now: NOW + 21 * 60_000 });
+  assert.equal(limited.calls.length, 1);
+});
+
+test("formatSurplusUsage shows spend, savings and the saved percentage", () => {
+  const usage = {
+    status: "ok",
+    fetchedAt: NOW,
+    models: {
+      "gpt-6-astra": { spent: 2977178, direct: 298525110, saved: 295547932 },
+      "glm-5.3-flash": { spent: 63, direct: 3705, saved: 3642 }
+    }
+  };
+
+  assert.equal(
+    formatSurplusUsage("gpt-6-astra", usage, "30d", NOW),
+    "30d $2.98 spent · $295.55 saved (99%)"
+  );
+  assert.equal(
+    formatSurplusUsage("glm-5.3-flash", usage, "30d", NOW),
+    "30d <$0.01 spent · <$0.01 saved (98%)"
+  );
+  assert.equal(formatSurplusUsage("kimi-k3", usage, "30d", NOW), "30d no usage listed");
+
+  const stale = { ...usage, status: "limited", fetchedAt: NOW - 2 * HOUR };
+  assert.equal(
+    formatSurplusUsage("gpt-6-astra", stale, "30d", NOW),
+    "30d $2.98 spent · $295.55 saved (99%) (rate limited, as of 2h ago)"
+  );
+  assert.equal(formatSurplusUsage("gpt-6-astra", { status: "rejected" }, "30d", NOW), "(key rejected)");
+  assert.equal(formatSurplusUsage("gpt-6-astra", { status: "unavailable" }, "30d", NOW), "");
+});
+
+test("claudeUsageLabels labels Surplus claudish profiles from one overview request", async () => {
+  const configDir = await tempConfigDir();
+  const http = fakeFetch(200, SURPLUS_BODY);
+  const profiles = [
+    { name: "astra", kind: "claudish", model: "surplus-gpt@gpt-6-astra", label: "Astra" },
+    { name: "glm", kind: "claudish", model: "surplus@glm-5.3", label: "GLM" },
+    { name: "other", kind: "claudish", model: "openrouter@x/y", label: "Other" }
+  ];
+
+  const labels = await claudeUsageLabels({
+    profiles,
+    configDir,
+    env: { SURPLUS_API_KEY: "inf_test" },
+    now: NOW,
+    fetcher: http.fetcher
+  });
+
+  assert.equal(http.calls.length, 1);
+  assert.equal(labels.get("astra"), "30d $2.98 spent · $295.55 saved (99%)");
+  assert.equal(labels.get("glm"), "30d $4.18 spent · $145.21 saved (97%)");
+  assert.equal(labels.has("other"), false);
+
+  const week = fakeFetch(200, SURPLUS_BODY);
+  await claudeUsageLabels({
+    profiles,
+    configDir: await tempConfigDir(),
+    env: { SURPLUS_API_KEY: "inf_test", SHAR_SURPLUS_RANGE: "7d" },
+    now: NOW,
+    fetcher: week.fetcher
+  });
+  assert.match(week.calls[0].url, /range=7d$/);
+
+  const noKey = fakeFetch(200, SURPLUS_BODY);
+  const none = await claudeUsageLabels({
+    profiles,
+    configDir: await tempConfigDir(),
+    env: {},
+    now: NOW,
+    fetcher: noKey.fetcher
+  });
+  assert.equal(none.size, 0);
+  assert.equal(noKey.calls.length, 0);
 });

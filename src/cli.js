@@ -407,11 +407,14 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
 async function pickCommand(store, io) {
   const profiles = await listClaudeProfiles({ configDir: store.paths.root });
   const usage = await claudeUsageLabels({ profiles, configDir: store.paths.root });
+  const labelWidth = Math.max(...profiles.map((candidate) => candidate.label.length));
   const profile = await pickOption({
     title: "Launch Claude Code with:",
     options: profiles.map((candidate) => ({
       name: candidate.name,
-      label: [candidate.label, usage.get(candidate.name)].filter(Boolean).join("  "),
+      label: usage.get(candidate.name)
+        ? `${candidate.label.padEnd(labelWidth)}  ${usage.get(candidate.name)}`
+        : candidate.label,
       value: candidate
     })),
     input: io.stdin,
