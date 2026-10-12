@@ -7,12 +7,20 @@ import { scanCredentialPaths } from "./watcher.js";
 import { getStatus, start as startDaemon, stop as stopDaemon } from "./daemon.js";
 import { pollAllProfiles } from "./quota.js";
 import { installWrappers, pathExport } from "./wrapper.js";
-import { launchClaude, setupClaudeProviders, switchClaudeProvider } from "./claude.js";
+import { pickOption } from "./picker.js";
+import {
+  addClaudeProfile,
+  launchClaudeProfile,
+  listClaudeProfiles,
+  resolveClaudeProfile,
+  setupClaudeProviders,
+  switchClaudeProvider
+} from "./claude.js";
 
 const DEFAULT_CONFIG_DIR = join(homedir(), ".config", "shar");
 
 export async function run(args, io = process) {
-  const command = args[0] ?? "help";
+  const command = args[0] ?? (isInteractive(io) ? "pick" : "help");
   const store = createStore({
     configDir: process.env.SHAR_CONFIG_DIR ?? DEFAULT_CONFIG_DIR,
     agents: parseAgentPathOverrides(process.env.SHAR_AGENT_PATHS)
@@ -49,6 +57,8 @@ export async function run(args, io = process) {
       return wrapCommand(store, io);
     case "claude":
       return claudeCommand(store, args.slice(1), io);
+    case "pick":
+      return pickCommand(store, io);
     case "watch":
       return watchCommand(store, io);
     case "daemon":
@@ -330,25 +340,112 @@ async function claudeCommand(store, args, io) {
     return;
   }
 
-  if (subcommand !== "subscription" && subcommand !== "foundry") {
-    throw new Error("Usage: shar claude <setup|switch|subscription|foundry> [claude-args...]");
+  if (subcommand === "add") {
+    return addClaudeProfileCommand(store, claudeArgs, settingsPath, io);
   }
 
-  const result = await launchClaude({
-    provider: subcommand,
+  if (subcommand === "list") {
+    const profiles = await listClaudeProfiles({ configDir: store.paths.root });
+    for (const profile of profiles) {
+      io.stdout.write(`${profile.name}\t${profile.kind}\t${profile.label}\n`);
+    }
+    return;
+  }
+
+  if (!subcommand) {
+    throw new Error("Usage: shar claude <setup|switch|add|list|profile> [claude-args...]");
+  }
+
+  const profile = await resolveClaudeProfile({ configDir: store.paths.root, name: subcommand });
+  await launchProfile(store, profile, claudeArgs, settingsPath, io);
+}
+
+async function addClaudeProfileCommand(store, args, settingsPath, io) {
+  const usage = [
+    "Usage: shar claude add <name> [--label <text>]",
+    "       shar claude add <name> --claudish <model> [--label <text>]",
+    "       printf '%s' '<token>' | shar claude add <name> --url <url> [--model <model>] [--label <text>]"
+  ].join("\n");
+
+  const [name, ...rest] = args;
+  if (!name || rest.length % 2 !== 0) throw new Error(usage);
+
+  const flags = {};
+  for (let index = 0; index < rest.length; index += 2) {
+    const flag = rest[index];
+    if (!["--label", "--claudish", "--url", "--model"].includes(flag)) throw new Error(usage);
+    flags[flag.slice(2)] = rest[index + 1];
+  }
+  if (flags.claudish && (flags.url || flags.model)) throw new Error(usage);
+  if (flags.model && !flags.url) throw new Error(usage);
+
+  const configDir = store.paths.root;
+  const label = flags.label;
+
+  if (flags.claudish) {
+    await addClaudeProfile({ configDir, name, kind: "claudish", model: flags.claudish, label });
+    io.stdout.write(`added ${name} (claudish ${flags.claudish})\n`);
+  } else if (flags.url) {
+    const token = (await readStdin(io, usage)).trim();
+    await addClaudeProfile({
+      configDir,
+      name,
+      kind: "endpoint",
+      url: flags.url,
+      model: flags.model,
+      token,
+      label
+    });
+    io.stdout.write(`added ${name} (endpoint ${flags.url})\n`);
+  } else {
+    await addClaudeProfile({ configDir, settingsPath, name, kind: "account", label });
+    io.stdout.write(`added ${name} (account); run: shar claude ${name}, then /login\n`);
+  }
+}
+
+async function pickCommand(store, io) {
+  const profiles = await listClaudeProfiles({ configDir: store.paths.root });
+  const profile = await pickOption({
+    title: "Launch Claude Code with:",
+    options: profiles.map((candidate) => ({
+      name: candidate.name,
+      label: candidate.label,
+      value: candidate
+    })),
+    input: io.stdin,
+    output: io.stdout
+  });
+  if (!profile) return;
+
+  await launchProfile(store, profile, [], claudeSettingsPath(), io);
+}
+
+async function launchProfile(store, profile, claudeArgs, settingsPath, io) {
+  const result = await launchClaudeProfile({
+    profile,
     args: claudeArgs,
     configDir: store.paths.root,
-    settingsPath
+    settingsPath,
+    claudeJsonPath: process.env.SHAR_CLAUDE_JSON ?? join(homedir(), ".claude.json"),
+    warn: (message) => io.stderr.write(`shar: ${message}\n`)
   });
   if (result.signal) throw new Error(`Claude exited from signal ${result.signal}`);
   if (result.code !== 0) io.exitCode = result.code ?? 1;
 }
 
-async function readStdin(io) {
+function claudeSettingsPath() {
+  return process.env.SHAR_CLAUDE_SETTINGS ?? join(homedir(), ".claude", "settings.json");
+}
+
+function isInteractive(io) {
+  return Boolean(io.stdin?.isTTY && io.stdout?.isTTY);
+}
+
+async function readStdin(io, usage = "Usage: printf '%s' '<key>' | shar set-key <agent> <profile>") {
   const stdin = io.stdin;
   if (!stdin) throw new Error("Missing stdin");
   if (stdin.isTTY) {
-    throw new Error("Usage: printf '%s' '<key>' | shar set-key <agent> <profile>");
+    throw new Error(usage);
   }
 
   const chunks = [];
@@ -415,7 +512,8 @@ Commands:
   auto-switch <agent>
   set-key <agent> <profile>
   wrap
-  claude <setup|switch|subscription|foundry> [claude-args...]
+  claude <setup|switch|add|list|profile> [claude-args...]
+  pick              (default in a terminal) choose a Claude profile to launch
   watch
   shard <start|stop|status>
 `;

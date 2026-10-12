@@ -1,6 +1,30 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+const BUILTIN_PROFILES = Object.freeze([
+  Object.freeze({ name: "foundry", kind: "foundry", label: "Foundry" }),
+  Object.freeze({ name: "subscription", kind: "subscription", label: "Personal subscription" })
+]);
+
+const RESERVED_PROFILE_NAMES = new Set(["setup", "switch", "add", "list", "pick"]);
+const PROFILE_NAME = /^[a-z0-9][a-z0-9._-]*$/i;
+
+// Account dirs mirror ~/.claude except identity state and dated backups.
+const ACCOUNT_LINK_SKIP = /^\.claude\.json|^\.credentials\.json|(^|\.)(backup|bak)([.-]|$)|^_?backups$/;
+const ACCOUNT_CANONICAL_FILES = new Set(["settings.json", "CLAUDE.md"]);
 
 const FOUNDRY_SCOPED_ENV = new Set([
   "ANTHROPIC_CUSTOM_HEADERS",
@@ -162,11 +186,233 @@ export async function launchClaude({
     throw new Error(`Unknown Claude provider: ${provider}`);
   }
 
+  return runChild(command, childArgs, childEnv, spawnProcess);
+}
+
+export function claudeProfilesPath(configDir) {
+  return join(configDir, "claude", "profiles.json");
+}
+
+export function claudeAccountDir(configDir, name) {
+  return join(configDir, "claude", "accounts", name);
+}
+
+export function claudeEndpointSettingsPath(configDir, name) {
+  return join(configDir, "claude", `${name}.settings.json`);
+}
+
+export async function listClaudeProfiles({ configDir }) {
+  const registered = await readProfileRegistry(configDir);
+  return [
+    ...BUILTIN_PROFILES,
+    ...Object.entries(registered).map(([name, entry]) => ({ label: name, ...entry, name }))
+  ];
+}
+
+export async function resolveClaudeProfile({ configDir, name }) {
+  const profiles = await listClaudeProfiles({ configDir });
+  const profile = profiles.find((candidate) => candidate.name === name);
+  if (!profile) throw new Error(`Unknown Claude profile: ${name}; run: shar claude list`);
+  return profile;
+}
+
+export async function addClaudeProfile({
+  configDir,
+  settingsPath,
+  name,
+  kind,
+  label,
+  model,
+  url,
+  token
+}) {
+  if (!name || !PROFILE_NAME.test(name)) throw new Error(`Invalid Claude profile name: ${name}`);
+  if (RESERVED_PROFILE_NAMES.has(name) || BUILTIN_PROFILES.some((p) => p.name === name)) {
+    throw new Error(`Claude profile name is reserved: ${name}`);
+  }
+  const registry = await readProfileRegistry(configDir);
+  if (registry[name]) throw new Error(`Claude profile already exists: ${name}`);
+
+  const entry = { kind };
+  if (label) entry.label = label;
+
+  if (kind === "claudish") {
+    if (!model) throw new Error("Claudish profiles require a model");
+    entry.model = model;
+  } else if (kind === "endpoint") {
+    if (!url) throw new Error("Endpoint profiles require a URL");
+    if (!token) throw new Error("Endpoint profiles require a token");
+    const env = { ANTHROPIC_BASE_URL: url, ANTHROPIC_AUTH_TOKEN: token };
+    if (model) env.ANTHROPIC_MODEL = model;
+    await writeJson(claudeEndpointSettingsPath(configDir, name), { env });
+  } else if (kind === "account") {
+    await syncAccountLinks({
+      sourceDir: dirname(settingsPath),
+      targetDir: claudeAccountDir(configDir, name)
+    });
+  } else {
+    throw new Error(`Unknown Claude profile kind: ${kind}`);
+  }
+
+  await writeJson(claudeProfilesPath(configDir), { profiles: { ...registry, [name]: entry } });
+  return { name, ...entry };
+}
+
+export async function launchClaudeProfile({
+  profile,
+  args = [],
+  configDir,
+  settingsPath,
+  claudeJsonPath,
+  warn = () => {},
+  env = process.env,
+  spawnProcess = spawn
+}) {
+  if (profile.kind === "foundry" || profile.kind === "subscription") {
+    return launchClaude({ provider: profile.kind, args, configDir, settingsPath, env, spawnProcess });
+  }
+
+  const childEnv = { ...env };
+
+  if (profile.kind === "claudish") {
+    const command = childEnv.SHAR_REAL_CLAUDISH ?? "claudish";
+    delete childEnv.SHAR_REAL_CLAUDISH;
+    deleteEnvWhere(childEnv, isFoundryEnvKey);
+    return runChild(command, ["-m", profile.model, ...args], childEnv, spawnProcess);
+  }
+
+  const command = childEnv.SHAR_REAL_CLAUDE ?? "claude";
+  delete childEnv.SHAR_REAL_CLAUDE;
+  deleteEnvWhere(childEnv, isProviderEnvKey);
+
+  if (profile.kind === "endpoint") {
+    const overlayPath = claudeEndpointSettingsPath(configDir, profile.name);
+    if (!(await exists(overlayPath))) {
+      throw new Error(`Claude endpoint is not configured: ${profile.name}`);
+    }
+    return runChild(command, ["--settings", overlayPath, ...args], childEnv, spawnProcess);
+  }
+
+  if (profile.kind === "account") {
+    await assertSubscriptionSettings(settingsPath);
+    const accountDir = claudeAccountDir(configDir, profile.name);
+    if (!(await exists(accountDir))) {
+      throw new Error(`Claude account is not set up: ${profile.name}; run: shar claude add ${profile.name}`);
+    }
+
+    const { repaired } = await syncAccountLinks({ sourceDir: dirname(settingsPath), targetDir: accountDir });
+    for (const name of repaired) {
+      warn(`${name} in ${profile.name} diverged from ~/.claude; kept as ${name}.shar-conflict`);
+    }
+    childEnv.CLAUDE_CONFIG_DIR = accountDir;
+
+    const mcpConfigPath = await writeMcpConfig({ configDir, name: profile.name, claudeJsonPath });
+    try {
+      const childArgs = mcpConfigPath ? ["--mcp-config", mcpConfigPath, ...args] : args;
+      return await runChild(command, childArgs, childEnv, spawnProcess);
+    } finally {
+      if (mcpConfigPath) await rm(mcpConfigPath, { force: true });
+    }
+  }
+
+  throw new Error(`Unknown Claude profile kind: ${profile.kind}`);
+}
+
+// Symlinks every top-level ~/.claude entry into an account's CLAUDE_CONFIG_DIR so
+// it shares skills, hooks, plugins, history and memory; credentials stay isolated.
+async function syncAccountLinks({ sourceDir, targetDir }) {
+  await mkdir(targetDir, { recursive: true, mode: 0o700 });
+  const repaired = [];
+
+  for (const name of await readdir(sourceDir)) {
+    if (ACCOUNT_LINK_SKIP.test(name)) continue;
+    const source = join(sourceDir, name);
+    const target = join(targetDir, name);
+
+    const current = await lstatOrNull(target);
+    if (current?.isSymbolicLink()) {
+      if ((await readlink(target)) === source) continue;
+      await unlink(target);
+    } else if (current) {
+      // Claude replaced the link with a real file; keep it for diffing and re-link.
+      if (!ACCOUNT_CANONICAL_FILES.has(name)) continue;
+      await rename(target, `${target}.shar-conflict`);
+      repaired.push(name);
+    }
+    await symlink(source, target);
+  }
+
+  return { repaired };
+}
+
+// User-scope MCP servers live in ~/.claude.json, which relocates with
+// CLAUDE_CONFIG_DIR, so hand them to the account session explicitly.
+async function writeMcpConfig({ configDir, name, claudeJsonPath }) {
+  let content;
+  try {
+    content = await readFile(claudeJsonPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+
+  let servers;
+  try {
+    servers = JSON.parse(content).mcpServers;
+  } catch {
+    throw new Error(`Invalid Claude config JSON: ${claudeJsonPath}`);
+  }
+  if (!isObject(servers) || Object.keys(servers).length === 0) return null;
+
+  const path = join(configDir, "claude", "run", `${name}-${process.pid}.mcp.json`);
+  await writeJson(path, { mcpServers: servers });
+  return path;
+}
+
+async function readProfileRegistry(configDir) {
+  const path = claudeProfilesPath(configDir);
+  let content;
+  try {
+    content = await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    throw error;
+  }
+
+  try {
+    const value = JSON.parse(content);
+    if (!isObject(value.profiles)) throw new Error("missing profiles");
+    return value.profiles;
+  } catch {
+    throw new Error(`Invalid Claude profiles file: ${path}`);
+  }
+}
+
+function runChild(command, args, env, spawnProcess) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(command, childArgs, { env: childEnv, stdio: "inherit" });
+    const child = spawnProcess(command, args, { env, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
+}
+
+function deleteEnvWhere(env, predicate) {
+  for (const key of Object.keys(env)) {
+    if (predicate(key)) delete env[key];
+  }
+}
+
+function isProviderEnvKey(key) {
+  return SUBSCRIPTION_AUTH_OVERRIDES.has(key) || isFoundryEnvKey(key);
+}
+
+async function lstatOrNull(path) {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 async function assertSubscriptionSettings(settingsPath) {

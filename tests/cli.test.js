@@ -471,3 +471,112 @@ test("shar claude switch and shar switch claude toggle settings.json", async () 
   const cfg3 = JSON.parse(await readFile(settingsPath, "utf8"));
   assert.equal(cfg3.env.CLAUDE_CODE_USE_FOUNDRY, "1");
 });
+
+async function makeFakeBinary(dir, name, body) {
+  const path = join(dir, name);
+  await writeFile(path, `#!/bin/sh\n${body}\n`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+test("shar claude add registers a claudish profile that list shows", async () => {
+  const configDir = await makeTempRoot();
+
+  const add = await runShar(
+    ["claude", "add", "glm", "--claudish", "surplus@glm-5.3", "--label", "Surplus GLM 5.3"],
+    configDir
+  );
+  assert.equal(add.status, 0);
+  assert.match(add.stdout, /added glm \(claudish surplus@glm-5\.3\)/);
+
+  const list = await runShar(["claude", "list"], configDir);
+  assert.equal(
+    list.stdout,
+    "foundry\tfoundry\tFoundry\n" +
+      "subscription\tsubscription\tPersonal subscription\n" +
+      "glm\tclaudish\tSurplus GLM 5.3\n"
+  );
+});
+
+test("shar claude <claudish profile> launches claudish with the model and extra args", async () => {
+  const configDir = await makeTempRoot();
+  const claudish = await makeFakeBinary(configDir, "fake-claudish", `printf '%s\\n' "$@"`);
+  await runShar(["claude", "add", "glm", "--claudish", "surplus@glm-5.3"], configDir);
+
+  const result = await runShar(["claude", "glm", "-p", "hi"], configDir, {
+    SHAR_REAL_CLAUDISH: claudish
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "-m\nsurplus@glm-5.3\n-p\nhi\n");
+});
+
+test("shar claude add reads an endpoint token from stdin and rejects a missing one", async () => {
+  const configDir = await makeTempRoot();
+
+  const missing = await runShar(["claude", "add", "litellm", "--url", "https://llm.example.test"], configDir);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /require a token/);
+
+  const added = await runShar(
+    ["claude", "add", "litellm", "--url", "https://llm.example.test", "--model", "gpt-x"],
+    configDir,
+    {},
+    "endpoint-token\n"
+  );
+  assert.equal(added.status, 0);
+  assert.match(added.stdout, /added litellm \(endpoint https:\/\/llm\.example\.test\)/);
+
+  const overlay = JSON.parse(await readFile(join(configDir, "claude", "litellm.settings.json"), "utf8"));
+  assert.equal(overlay.env.ANTHROPIC_AUTH_TOKEN, "endpoint-token");
+  assert.equal(overlay.env.ANTHROPIC_MODEL, "gpt-x");
+});
+
+test("shar claude account launches claude in its own config dir with user MCP servers", async () => {
+  const configDir = await makeTempRoot();
+  const home = join(configDir, "home");
+  await mkdir(join(home, ".claude"), { recursive: true });
+  const settingsPath = join(home, ".claude", "settings.json");
+  const claudeJsonPath = join(home, ".claude.json");
+  await writeFile(settingsPath, "{}");
+  await writeFile(claudeJsonPath, JSON.stringify({ mcpServers: { mem0: { command: "mem0-mcp" } } }));
+  const claude = await makeFakeBinary(
+    configDir,
+    "fake-claude",
+    `echo "dir=$CLAUDE_CONFIG_DIR"\necho "first=$1"\necho "mcp=$(tr -d ' \\n' < "$2")"`
+  );
+  const env = {
+    SHAR_CLAUDE_SETTINGS: settingsPath,
+    SHAR_CLAUDE_JSON: claudeJsonPath,
+    SHAR_REAL_CLAUDE: claude
+  };
+
+  const add = await runShar(["claude", "add", "sub2"], configDir, env);
+  assert.equal(add.status, 0);
+  assert.match(add.stdout, /added sub2 \(account\); run: shar claude sub2, then \/login/);
+
+  const result = await runShar(["claude", "sub2"], configDir, env);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, new RegExp(`dir=${join(configDir, "claude", "accounts", "sub2")}\\n`));
+  assert.match(result.stdout, /first=--mcp-config\n/);
+  assert.match(result.stdout, /mcp=\{"mcpServers":\{"mem0":\{"command":"mem0-mcp"\}\}\}/);
+});
+
+test("shar claude rejects unknown profiles", async () => {
+  const configDir = await makeTempRoot();
+
+  const result = await runShar(["claude", "ghost"], configDir);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown Claude profile: ghost/);
+});
+
+test("bare shar prints help when not attached to a terminal", async () => {
+  const configDir = await makeTempRoot();
+
+  const result = await runShar([], configDir);
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: shar <command>/);
+  assert.match(result.stdout, /claude <setup\|switch\|add\|list\|profile>/);
+});
