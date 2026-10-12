@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   cp,
   lstat,
   mkdir,
@@ -57,6 +58,10 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
     const config = agentRegistry[agent];
     const files = config?.files;
 
+    if (files && files.length > 0 && !(await anyListedFileExists(sourcePath, files))) {
+      return { created: false, profile: null, agent, checksum: null };
+    }
+
     const checksum = await checksumPath(sourcePath, files);
     const existing = await findSnapshotByChecksum(agent, checksum);
     if (existing) {
@@ -73,7 +78,7 @@ export function createStore({ configDir = DEFAULT_CONFIG_DIR, agents = {} } = {}
         const srcFile = join(sourcePath, file);
         const destFile = join(target, file);
         if (await exists(srcFile)) {
-          await cp(srcFile, destFile, { recursive: true, preserveTimestamps: true });
+          await copySecretFile(srcFile, destFile);
         }
       }
     } else {
@@ -351,7 +356,7 @@ async function restoreAgentSnapshot({ agent, backupId, destination, source, prof
         const destFile = join(destination, file);
         const backFile = join(backupPath, file);
         if (await exists(destFile)) {
-          await cp(destFile, backFile, { recursive: true, preserveTimestamps: true });
+          await copySecretFile(destFile, backFile);
         }
       }
     } else {
@@ -369,13 +374,25 @@ async function restoreAgentSnapshot({ agent, backupId, destination, source, prof
       const destFile = join(destination, file);
       await rm(destFile, { recursive: true, force: true });
       if (await exists(srcFile)) {
-        await cp(srcFile, destFile, { recursive: true, preserveTimestamps: true });
+        await copySecretFile(srcFile, destFile);
       }
     }
   } else {
     await rm(destination, { recursive: true, force: true });
     await cp(source, destination, { recursive: true, preserveTimestamps: true });
   }
+}
+
+async function anyListedFileExists(base, files) {
+  for (const file of files) {
+    if (await exists(join(base, file))) return true;
+  }
+  return false;
+}
+
+async function copySecretFile(src, dest) {
+  await cp(src, dest, { preserveTimestamps: true });
+  await chmod(dest, 0o600);
 }
 
 async function checksumPath(path, files) {

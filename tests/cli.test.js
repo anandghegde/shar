@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,11 +10,33 @@ async function makeTempRoot() {
   return mkdtemp(join(tmpdir(), "shar-cli-test-"));
 }
 
-function runShar(args, configDir, env = {}) {
+function runShar(args, configDir, env = {}, input = null) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["./bin/shar", ...args], {
       cwd: process.cwd(),
       env: { ...process.env, SHAR_CONFIG_DIR: configDir, ...env },
+      stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    if (input != null) {
+      child.stdin.write(input);
+      child.stdin.end();
+    }
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function runBin(bin, args, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -294,6 +316,75 @@ test("shar auto-switch restores the best profile for the agent and sets it activ
   assert.equal(await readFile(join(destDir, "credentials.json"), "utf8"), "from-best");
 });
 
+test("shar wrap installs a droid wrapper under the config bin dir", async () => {
+  const configDir = await makeTempRoot();
+  const factoryDir = join(configDir, "factory-home");
+  const env = { SHAR_AGENT_PATHS: JSON.stringify({ factory: factoryDir }) };
+  const result = await runShar(["wrap"], configDir, env);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /installed droid\t/);
+  assert.ok(result.stdout.includes(`PATH: export PATH="${configDir}/bin:$PATH"`));
+});
+
+test("shar set-key saves a factory API key and the wrapper injects it", async () => {
+  const configDir = await makeTempRoot();
+  const factoryDir = join(configDir, "factory-home");
+  const fakeDroid = join(configDir, "fake-droid");
+  await writeFile(
+    fakeDroid,
+    "#!/bin/sh\nprintf 'key=%s\\n' \"$FACTORY_API_KEY\"\nprintf 'arg=%s\\n' \"$1\"\n",
+    { mode: 0o755 }
+  );
+  await chmod(fakeDroid, 0o755);
+
+  const env = { SHAR_AGENT_PATHS: JSON.stringify({ factory: factoryDir }) };
+  const result = await runShar(["set-key", "factory", "work"], configDir, env, "fk-test-key-123\n");
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /saved work factory api-key/);
+  assert.equal((await readFile(join(factoryDir, "api-key"), "utf8")).trim(), "fk-test-key-123");
+
+  const wrapper = join(configDir, "bin", "droid");
+  const execResult = await runBin(wrapper, ["hello"], { SHAR_REAL_DROID: fakeDroid });
+  assert.equal(execResult.status, 0, execResult.stderr);
+  assert.match(execResult.stdout, /^key=fk-test-key-123$/m);
+  assert.match(execResult.stdout, /^arg=hello$/m);
+});
+
+test("shar switch to a login profile clears the live factory api-key", async () => {
+  const configDir = await makeTempRoot();
+  const factoryDir = join(configDir, "factory-home");
+  const loginSource = join(configDir, "login-source");
+  await mkdir(loginSource, { recursive: true });
+  await writeFile(join(loginSource, "auth.v2.loginkeychain"), "login-blob");
+
+  const env = { SHAR_AGENT_PATHS: JSON.stringify({ factory: factoryDir }) };
+  const setKey = await runShar(["set-key", "factory", "work"], configDir, env, "fk-work\n");
+  assert.equal(setKey.status, 0, setKey.stderr);
+  const saveLogin = await runShar(["save", "factory", "personal", loginSource], configDir, env);
+  assert.equal(saveLogin.status, 0, saveLogin.stderr);
+
+  const switched = await runShar(["switch", "personal"], configDir, env);
+  assert.equal(switched.status, 0, switched.stderr);
+  assert.equal(await readFile(join(factoryDir, "auth.v2.loginkeychain"), "utf8"), "login-blob");
+
+  let missing = false;
+  try {
+    await readFile(join(factoryDir, "api-key"), "utf8");
+  } catch (error) {
+    missing = error.code === "ENOENT";
+  }
+  assert.equal(missing, true);
+});
+
+test("shar set-key rejects agents without api-key support", async () => {
+  const configDir = await makeTempRoot();
+  const result = await runShar(["set-key", "claude", "work"], configDir, {}, "fk-nope\n");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /does not support API key files/);
+});
+
 test("shar with an unknown command exits nonzero", async () => {
   const configDir = await makeTempRoot();
   const result = await runShar(["bogus"], configDir);
@@ -322,4 +413,61 @@ test("shard status reports stopped before daemon implementation", async () => {
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /stopped/);
+});
+
+test("shar claude switch and shar switch claude toggle settings.json", async () => {
+  const configDir = await makeTempRoot();
+  const claudeDir = join(configDir, ".claude");
+  await mkdir(claudeDir, { recursive: true });
+  await mkdir(join(configDir, "claude"), { recursive: true });
+
+  const settingsPath = join(claudeDir, "settings.json");
+  const overlayPath = join(configDir, "claude", "foundry.settings.json");
+
+  await writeFile(settingsPath, JSON.stringify({
+    cleanupPeriodDays: 90,
+    env: { COMMON: "value" }
+  }));
+  await writeFile(overlayPath, JSON.stringify({
+    env: {
+      CLAUDE_CODE_USE_FOUNDRY: "1",
+      ANTHROPIC_FOUNDRY_API_KEY: "foundry-test-key"
+    }
+  }));
+
+  const env = { SHAR_CLAUDE_SETTINGS: settingsPath };
+
+  // 1. shar claude switch foundry
+  const res1 = await runShar(["claude", "switch", "foundry"], configDir, env);
+  assert.equal(res1.status, 0, res1.stderr);
+  assert.match(res1.stdout, /switched claude to foundry/);
+
+  const cfg1 = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(cfg1.env.CLAUDE_CODE_USE_FOUNDRY, "1");
+  assert.equal(cfg1.env.ANTHROPIC_FOUNDRY_API_KEY, "foundry-test-key");
+  assert.equal(cfg1.env.COMMON, "value");
+
+  const cur1 = await runShar(["current"], configDir, env);
+  assert.match(cur1.stdout, /claude\tactive:foundry/);
+
+  // 2. shar switch claude subscription
+  const res2 = await runShar(["switch", "claude", "subscription"], configDir, env);
+  assert.equal(res2.status, 0, res2.stderr);
+  assert.match(res2.stdout, /switched claude to subscription/);
+
+  const cfg2 = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(cfg2.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
+  assert.equal(cfg2.env.ANTHROPIC_FOUNDRY_API_KEY, undefined);
+  assert.equal(cfg2.env.COMMON, "value");
+
+  const cur2 = await runShar(["current"], configDir, env);
+  assert.match(cur2.stdout, /claude\tactive:subscription/);
+
+  // 3. shar switch foundry
+  const res3 = await runShar(["switch", "foundry"], configDir, env);
+  assert.equal(res3.status, 0, res3.stderr);
+  assert.match(res3.stdout, /switched claude to foundry/);
+
+  const cfg3 = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(cfg3.env.CLAUDE_CODE_USE_FOUNDRY, "1");
 });

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp } from "node:fs/promises";
 
+import { PHASE1_AGENTS } from "../src/agents.js";
 import { createStore } from "../src/store.js";
 
 async function makeTempRoot() {
@@ -340,5 +341,77 @@ test("file-subset agents (e.g. factory) round-trip save -> show -> switch -> res
   assert.equal(await readFile(join(destinationDir, "auth.v2.file"), "utf8"), "file-content");
   assert.equal(await readFile(join(destinationDir, "auth.v2.key"), "utf8"), "key-content");
   assert.equal(await readFile(join(destinationDir, "unrelated.txt"), "utf8"), "original-adjacent-content");
+});
+
+test("factory default files include login-keychain and api-key", () => {
+  assert.deepEqual(PHASE1_AGENTS.factory.files, [
+    "auth.v2.loginkeychain",
+    "auth.v2.keyring",
+    "auth.v2.file",
+    "auth.v2.key",
+    "api-key"
+  ]);
+  assert.equal(PHASE1_AGENTS.factory.wrapper.command, "droid");
+  assert.equal(PHASE1_AGENTS.factory.wrapper.envVar, "FACTORY_API_KEY");
+});
+
+test("file-subset saveSnapshot skips when none of the listed files exist", async () => {
+  const configDir = await makeTempRoot();
+  const sourceDir = join(configDir, "factory-source");
+  await mkdir(sourceDir, { recursive: true });
+  await writeFile(join(sourceDir, "unrelated.txt"), "nope");
+
+  const store = createStore({
+    configDir,
+    agents: {
+      factory: {
+        credentialPath: sourceDir,
+        files: ["auth.v2.loginkeychain", "api-key"]
+      }
+    }
+  });
+
+  const result = await store.saveSnapshot({
+    agent: "factory",
+    profile: "work",
+    sourcePath: sourceDir
+  });
+  assert.equal(result.created, false);
+  assert.equal(result.profile, null);
+  assert.deepEqual(await store.listProfiles(), []);
+});
+
+test("factory api-key profile restore removes the live key when switching to a login snapshot", async () => {
+  const configDir = await makeTempRoot();
+  const destinationDir = join(configDir, "dest", "factory");
+  await mkdir(destinationDir, { recursive: true });
+
+  const store = createStore({
+    configDir,
+    agents: {
+      factory: {
+        credentialPath: destinationDir,
+        files: ["auth.v2.loginkeychain", "api-key"]
+      }
+    }
+  });
+
+  const keySource = join(configDir, "key-source");
+  await mkdir(keySource, { recursive: true });
+  await writeFile(join(keySource, "api-key"), "fk-work\n");
+  await store.saveSnapshot({ agent: "factory", profile: "work", sourcePath: keySource });
+
+  const loginSource = join(configDir, "login-source");
+  await mkdir(loginSource, { recursive: true });
+  await writeFile(join(loginSource, "auth.v2.loginkeychain"), "login-blob");
+  await store.saveSnapshot({ agent: "factory", profile: "personal", sourcePath: loginSource });
+
+  await store.restoreAgent("factory", "work");
+  assert.equal(await readFile(join(destinationDir, "api-key"), "utf8"), "fk-work\n");
+  assert.equal(await exists(join(destinationDir, "auth.v2.loginkeychain")), false);
+
+  await store.restoreAgent("factory", "personal");
+  assert.equal(await readFile(join(destinationDir, "auth.v2.loginkeychain"), "utf8"), "login-blob");
+  assert.equal(await exists(join(destinationDir, "api-key")), false);
 });
 

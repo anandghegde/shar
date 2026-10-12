@@ -9,7 +9,18 @@ export const PHASE1_AGENTS = Object.freeze({
   gemini: Object.freeze({ credentialPath: join(homedir(), ".config", "gcloud") }),
   factory: Object.freeze({
     credentialPath: join(homedir(), ".factory"),
-    files: ["auth.v2.file", "auth.v2.key"]
+    files: [
+      "auth.v2.loginkeychain",
+      "auth.v2.keyring",
+      "auth.v2.file",
+      "auth.v2.key",
+      "api-key"
+    ],
+    wrapper: Object.freeze({
+      command: "droid",
+      envVar: "FACTORY_API_KEY",
+      keyFile: "api-key"
+    })
   }),
   codebuff: Object.freeze({
     credentialPath: join(homedir(), ".config", "manicode", "credentials.json")

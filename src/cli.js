@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -6,6 +6,8 @@ import { createStore } from "./store.js";
 import { scanCredentialPaths } from "./watcher.js";
 import { getStatus, start as startDaemon, stop as stopDaemon } from "./daemon.js";
 import { pollAllProfiles } from "./quota.js";
+import { installWrappers, pathExport } from "./wrapper.js";
+import { launchClaude, setupClaudeProviders, switchClaudeProvider } from "./claude.js";
 
 const DEFAULT_CONFIG_DIR = join(homedir(), ".config", "shar");
 
@@ -41,6 +43,12 @@ export async function run(args, io = process) {
       return bestCommand(store, args.slice(1), io);
     case "auto-switch":
       return autoSwitchCommand(store, args.slice(1), io);
+    case "set-key":
+      return setKeyCommand(store, args.slice(1), io);
+    case "wrap":
+      return wrapCommand(store, io);
+    case "claude":
+      return claudeCommand(store, args.slice(1), io);
     case "watch":
       return watchCommand(store, io);
     case "daemon":
@@ -62,6 +70,9 @@ async function saveCommand(store, args, io) {
   }
 
   const result = await store.saveSnapshot({ agent, profile, sourcePath });
+  if (!result.profile) {
+    throw new Error(`No credential files found for ${agent} at ${sourcePath}`);
+  }
   const action = result.created ? "saved" : "deduplicated";
   io.stdout.write(`${action} ${result.profile} ${result.agent} ${result.checksum}\n`);
 }
@@ -93,8 +104,41 @@ async function showCommand(store, args, io) {
 }
 
 async function switchCommand(store, args, io) {
-  const [profileName] = args;
+  const [profileName, maybeProvider] = args;
   if (!profileName) throw new Error("Usage: shar switch <profile>");
+
+  if (profileName === "claude" && maybeProvider) {
+    if (maybeProvider !== "subscription" && maybeProvider !== "foundry") {
+      throw new Error("Usage: shar switch claude <subscription|foundry>");
+    }
+    const settingsPath = process.env.SHAR_CLAUDE_SETTINGS ??
+      join(homedir(), ".claude", "settings.json");
+    await switchClaudeProvider({
+      configDir: store.paths.root,
+      settingsPath,
+      provider: maybeProvider
+    });
+    await store.setActive("claude", maybeProvider);
+    io.stdout.write(`switched claude to ${maybeProvider}\n`);
+    return;
+  }
+
+  if (profileName === "foundry" || profileName === "subscription") {
+    const profiles = await store.listProfiles();
+    const hasProfile = profiles.some((p) => p.name === profileName);
+    if (!hasProfile) {
+      const settingsPath = process.env.SHAR_CLAUDE_SETTINGS ??
+        join(homedir(), ".claude", "settings.json");
+      await switchClaudeProvider({
+        configDir: store.paths.root,
+        settingsPath,
+        provider: profileName
+      });
+      await store.setActive("claude", profileName);
+      io.stdout.write(`switched claude to ${profileName}\n`);
+      return;
+    }
+  }
 
   const result = await store.restoreProfile(profileName);
   io.stdout.write(`switched ${profileName} for ${result.restoredAgents.join(",")}\n`);
@@ -205,6 +249,115 @@ async function autoSwitchCommand(store, args, io) {
   io.stdout.write(`switched ${agent} to ${profile}\n`);
 }
 
+async function setKeyCommand(store, args, io) {
+  const [agent, profile] = args;
+  if (!agent || !profile) throw new Error("Usage: shar set-key <agent> <profile>");
+
+  const config = store.agents[agent];
+  if (!config) throw new Error(`Unknown agent: ${agent}`);
+
+  const keyFile = config.wrapper?.keyFile ?? "api-key";
+  if (!config.files?.includes(keyFile)) {
+    throw new Error(`Agent ${agent} does not support API key files`);
+  }
+  if (!config.credentialPath) throw new Error(`No credential path configured for agent: ${agent}`);
+
+  const key = (await readStdin(io)).trim();
+  if (!key) throw new Error("Missing API key on stdin");
+
+  await mkdir(config.credentialPath, { recursive: true, mode: 0o700 });
+  await writeFile(join(config.credentialPath, keyFile), `${key}\n`, { mode: 0o600 });
+
+  const result = await store.saveSnapshot({
+    agent,
+    profile,
+    sourcePath: config.credentialPath
+  });
+  if (!result.profile) throw new Error(`Failed to save ${agent} API key profile`);
+  await store.setActive(agent, result.profile);
+
+  const wrap = await installWrappers({ configDir: store.paths.root, agents: store.agents });
+  const action = result.created ? "saved" : "deduplicated";
+  io.stdout.write(`${action} ${result.profile} ${agent} api-key\n`);
+  io.stdout.write(`PATH: ${pathExport(wrap.binDir)}\n`);
+}
+
+async function wrapCommand(store, io) {
+  const result = await installWrappers({ configDir: store.paths.root, agents: store.agents });
+  if (result.installed.length === 0) {
+    io.stdout.write("no wrappers to install\n");
+    return;
+  }
+  for (const item of result.installed) {
+    io.stdout.write(`installed ${item.command}\t${item.path}\n`);
+  }
+  io.stdout.write(`PATH: ${pathExport(result.binDir)}\n`);
+}
+
+async function claudeCommand(store, args, io) {
+  const [subcommand, ...claudeArgs] = args;
+  const settingsPath = process.env.SHAR_CLAUDE_SETTINGS ??
+    join(homedir(), ".claude", "settings.json");
+
+  if (subcommand === "setup") {
+    if (claudeArgs.length > 0) throw new Error("Usage: shar claude setup");
+    const result = await setupClaudeProviders({
+      configDir: store.paths.root,
+      settingsPath
+    });
+    if (!result.created) {
+      io.stdout.write(`Claude providers already configured at ${result.overlayPath}\n`);
+      return;
+    }
+    io.stdout.write(`Configured Claude subscription and Foundry providers.\n`);
+    io.stdout.write(`Foundry settings: ${result.overlayPath}\n`);
+    io.stdout.write(`Backup: ${result.backupPath}\n`);
+    return;
+  }
+
+  if (subcommand === "switch") {
+    const [provider] = claudeArgs;
+    if (!provider || (provider !== "subscription" && provider !== "foundry")) {
+      throw new Error("Usage: shar claude switch <subscription|foundry>");
+    }
+    const result = await switchClaudeProvider({
+      configDir: store.paths.root,
+      settingsPath,
+      provider
+    });
+    await store.setActive("claude", provider);
+    io.stdout.write(`switched claude to ${provider}\n`);
+    return;
+  }
+
+  if (subcommand !== "subscription" && subcommand !== "foundry") {
+    throw new Error("Usage: shar claude <setup|switch|subscription|foundry> [claude-args...]");
+  }
+
+  const result = await launchClaude({
+    provider: subcommand,
+    args: claudeArgs,
+    configDir: store.paths.root,
+    settingsPath
+  });
+  if (result.signal) throw new Error(`Claude exited from signal ${result.signal}`);
+  if (result.code !== 0) io.exitCode = result.code ?? 1;
+}
+
+async function readStdin(io) {
+  const stdin = io.stdin;
+  if (!stdin) throw new Error("Missing stdin");
+  if (stdin.isTTY) {
+    throw new Error("Usage: printf '%s' '<key>' | shar set-key <agent> <profile>");
+  }
+
+  const chunks = [];
+  for await (const chunk of stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function watchCommand(store, io) {
   const results = await scanCredentialPaths({ store, agents: store.agents });
   for (const { agent, profile, created } of results) {
@@ -260,6 +413,9 @@ Commands:
   usage [refresh]
   best <agent>
   auto-switch <agent>
+  set-key <agent> <profile>
+  wrap
+  claude <setup|switch|subscription|foundry> [claude-args...]
   watch
   shard <start|stop|status>
 `;
