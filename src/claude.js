@@ -308,7 +308,8 @@ export async function launchClaudeProfile({
 
     const mcpConfigPath = await writeMcpConfig({ configDir, name: profile.name, claudeJsonPath });
     try {
-      const childArgs = mcpConfigPath ? ["--mcp-config", mcpConfigPath, ...args] : args;
+      // --mcp-config is variadic; the = form keeps it from swallowing later args.
+      const childArgs = mcpConfigPath ? [`--mcp-config=${mcpConfigPath}`, ...args] : args;
       return await runChild(command, childArgs, childEnv, spawnProcess);
     } finally {
       if (mcpConfigPath) await rm(mcpConfigPath, { force: true });

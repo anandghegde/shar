@@ -543,7 +543,7 @@ test("shar claude account launches claude in its own config dir with user MCP se
   const claude = await makeFakeBinary(
     configDir,
     "fake-claude",
-    `echo "dir=$CLAUDE_CONFIG_DIR"\necho "first=$1"\necho "mcp=$(tr -d ' \\n' < "$2")"`
+    `echo "dir=$CLAUDE_CONFIG_DIR"\necho "first=\${1%%=*}"\necho "mcp=$(tr -d ' \\n' < "\${1#*=}")"`
   );
   const env = {
     SHAR_CLAUDE_SETTINGS: settingsPath,

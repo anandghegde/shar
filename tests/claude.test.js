@@ -394,8 +394,9 @@ test("account launch isolates CLAUDE_CONFIG_DIR and hands over user MCP servers"
   const seen = {};
   const spawnProcess = (command, args, options) => {
     calls.push({ command, args, options });
-    seen.mcp = JSON.parse(readFileSync(args[1], "utf8"));
-    seen.mode = readFileSyncMode(args[1]);
+    seen.path = args[0].slice("--mcp-config=".length);
+    seen.mcp = JSON.parse(readFileSync(seen.path, "utf8"));
+    seen.mode = readFileSyncMode(seen.path);
     const child = new EventEmitter();
     queueMicrotask(() => child.emit("exit", 0, null));
     return child;
@@ -418,15 +419,15 @@ test("account launch isolates CLAUDE_CONFIG_DIR and hands over user MCP servers"
 
   const [call] = calls;
   assert.equal(call.command, "/test/bin/claude");
-  assert.equal(call.args[0], "--mcp-config");
-  assert.equal(call.args[2], "--continue");
+  assert.ok(call.args[0].startsWith("--mcp-config="));
+  assert.equal(call.args[1], "--continue");
   assert.equal(call.options.env.CLAUDE_CONFIG_DIR, claudeAccountDir(configDir, "sub2"));
   assert.equal(call.options.env.KEEP_VALUE, "yes");
   assert.equal(call.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(call.options.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
   assert.deepEqual(seen.mcp, { mcpServers: servers });
   assert.equal(seen.mode, 0o600);
-  await assert.rejects(() => stat(call.args[1]), { code: "ENOENT" });
+  await assert.rejects(() => stat(seen.path), { code: "ENOENT" });
 });
 
 function readFileSyncMode(path) {
