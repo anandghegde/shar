@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { claudeAccountDir } from "./claude.js";
@@ -23,24 +24,36 @@ export function claudeKeychainService(claudeConfigDir) {
   return `Claude Code-credentials-${hash.slice(0, 8)}`;
 }
 
+// Without a Keychain (Linux), Claude Code keeps the login in this file instead.
+export function claudeCredentialsPath(claudeConfigDir) {
+  return join(claudeConfigDir ?? join(homedir(), ".claude"), ".credentials.json");
+}
+
 export async function readOAuthCredential({
   service,
+  credentialsPath,
   securityBin = "security",
   exec = runExec
 }) {
-  let stdout;
+  let stdout = null;
   try {
     stdout = await exec(securityBin, ["find-generic-password", "-s", service, "-w"], {
       timeout: REQUEST_TIMEOUT_MS
     });
   } catch {
-    return null;
+    if (credentialsPath) stdout = await readFile(credentialsPath, "utf8").catch(() => null);
   }
+  if (stdout === null) return null;
 
   try {
     const oauth = JSON.parse(stdout).claudeAiOauth;
     if (typeof oauth?.accessToken !== "string") return null;
-    return { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt };
+    return {
+      accessToken: oauth.accessToken,
+      expiresAt: oauth.expiresAt,
+      refreshable: typeof oauth.refreshToken === "string",
+      refreshExpiresAt: oauth.refreshTokenExpiresAt
+    };
   } catch {
     return null;
   }
@@ -95,11 +108,16 @@ export async function getClaudeUsage({
 
   const credential = await readOAuthCredential({
     service: claudeKeychainService(claudeConfigDir),
+    credentialsPath: claudeCredentialsPath(claudeConfigDir),
     securityBin: env.SHAR_SECURITY_BIN,
     exec
   });
   if (!credential) return { status: "login", ...last };
-  if (credential.expiresAt && credential.expiresAt <= now) return { status: "expired", ...last };
+  if (credential.expiresAt && credential.expiresAt <= now) {
+    // Claude Code swaps in a fresh access token on its next launch; only a dead refresh token needs /login.
+    const refreshable = credential.refreshable && !(credential.refreshExpiresAt <= now);
+    return { status: refreshable ? "idle" : "expired", ...last };
+  }
 
   let result;
   try {
@@ -230,6 +248,7 @@ export function formatClaudeUsage(usage, now = Date.now()) {
   const notes = [];
   if (usage.status === "expired") notes.push("login expired");
   if (usage.status === "login") notes.push("not logged in");
+  if (usage.status === "idle") notes.push("refreshes on launch");
   if (usage.status === "limited") notes.push("rate limited");
   if (parts.length > 0 && usage.status !== "ok") notes.push(`as of ${formatDuration(now - usage.fetchedAt)} ago`);
 

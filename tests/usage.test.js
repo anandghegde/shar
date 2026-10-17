@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
+  claudeCredentialsPath,
   claudeKeychainService,
   claudeUsageLabels,
   fetchOAuthUsage,
@@ -61,7 +62,9 @@ test("readOAuthCredential parses the Keychain JSON and tolerates failures", asyn
   const ok = fakeExec({ credential: { accessToken: "tok", expiresAt: NOW + HOUR } });
   assert.deepEqual(await readOAuthCredential({ service: "svc", exec: ok.exec }), {
     accessToken: "tok",
-    expiresAt: NOW + HOUR
+    expiresAt: NOW + HOUR,
+    refreshable: false,
+    refreshExpiresAt: undefined
   });
   assert.deepEqual(ok.calls[0].args, ["find-generic-password", "-s", "svc", "-w"]);
 
@@ -70,6 +73,35 @@ test("readOAuthCredential parses the Keychain JSON and tolerates failures", asyn
     await readOAuthCredential({ service: "svc", exec: async () => "not json" }),
     null
   );
+});
+
+test("readOAuthCredential falls back to the credentials file when there is no Keychain", async () => {
+  const dir = await tempConfigDir();
+  const credentialsPath = claudeCredentialsPath(dir);
+  assert.equal(credentialsPath, join(dir, ".credentials.json"));
+
+  const noKeychain = async () => {
+    throw Object.assign(new Error("spawn security ENOENT"), { code: "ENOENT" });
+  };
+  assert.equal(await readOAuthCredential({ service: "svc", credentialsPath, exec: noKeychain }), null);
+
+  await writeFile(
+    credentialsPath,
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "file-tok",
+        refreshToken: "refresh",
+        expiresAt: NOW + HOUR,
+        refreshTokenExpiresAt: NOW + 30 * 24 * HOUR
+      }
+    })
+  );
+  assert.deepEqual(await readOAuthCredential({ service: "svc", credentialsPath, exec: noKeychain }), {
+    accessToken: "file-tok",
+    expiresAt: NOW + HOUR,
+    refreshable: true,
+    refreshExpiresAt: NOW + 30 * 24 * HOUR
+  });
 });
 
 test("fetchOAuthUsage sends the OAuth headers and maps statuses", async () => {
@@ -137,9 +169,35 @@ test("getClaudeUsage serves last-known numbers when the token expired or login i
   assert.equal(expired.status, "expired");
   assert.equal(expired.sevenDay.used, 41);
 
+  const idle = await getClaudeUsage({
+    configDir,
+    name: "sub2",
+    now: NOW,
+    env: {},
+    exec: fakeExec({
+      credential: { accessToken: "tok", refreshToken: "r", expiresAt: NOW - 1000, refreshTokenExpiresAt: NOW + HOUR }
+    }).exec,
+    fetcher: http.fetcher
+  });
+  assert.equal(idle.status, "idle");
+  assert.equal(idle.sevenDay.used, 41);
+
+  const deadRefresh = await getClaudeUsage({
+    configDir,
+    name: "sub2",
+    now: NOW,
+    env: {},
+    exec: fakeExec({
+      credential: { accessToken: "tok", refreshToken: "r", expiresAt: NOW - 1000, refreshTokenExpiresAt: NOW - 1000 }
+    }).exec,
+    fetcher: http.fetcher
+  });
+  assert.equal(deadRefresh.status, "expired");
+
   const noLogin = await getClaudeUsage({
     configDir,
     name: "sub2",
+    claudeConfigDir: configDir,
     now: NOW,
     env: {},
     exec: fakeExec({ credential: null }).exec,
@@ -200,6 +258,7 @@ test("formatClaudeUsage shows what is left, reset times and staleness", () => {
   assert.equal(stale, "5h 100% left · 7d 59% left ↻1d (login expired, as of 3h ago)");
 
   assert.equal(formatClaudeUsage({ status: "login" }, NOW), "(not logged in)");
+  assert.equal(formatClaudeUsage({ status: "idle" }, NOW), "(refreshes on launch)");
   assert.equal(formatClaudeUsage({ status: "unavailable" }, NOW), "");
 });
 

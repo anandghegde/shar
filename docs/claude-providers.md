@@ -112,9 +112,9 @@ For `subscription` and `account` profiles the picker shows what is left in the 5
 
 How it works, and what to know before relying on it:
 
-- shar reads the profile's OAuth token from the macOS Keychain (`Claude Code-credentials`, or `Claude Code-credentials-<sha256(dir)[:8]>` for accounts) and calls the undocumented `GET api.anthropic.com/api/oauth/usage`, the same data `/usage` shows. macOS may ask once to let `security` read each item.
+- shar reads the profile's OAuth token from the macOS Keychain (`Claude Code-credentials`, or `Claude Code-credentials-<sha256(dir)[:8]>` for accounts) and calls the undocumented `GET api.anthropic.com/api/oauth/usage`, the same data `/usage` shows. macOS may ask once to let `security` read each item. Where there is no Keychain (Linux), it reads `<config dir>/.credentials.json` instead (`~/.claude/.credentials.json`, or the account dir).
 - Requests send `User-Agent: claude-code/<installed version>`; without it the endpoint is rate-limited aggressively. Results are cached for 3 minutes in `~/.config/shar/claude/usage/<profile>.json` (`0600`), and a 429 backs off for 5 minutes.
-- Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(login expired, as of 3h ago)`. A window whose reset time has passed is shown as `100% left`.
+- Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(refreshes on launch, as of 3h ago)`. `(login expired)` means the refresh token is gone too and the profile needs `/login`. A window whose reset time has passed is shown as `100% left`.
 - Foundry and claudish options have no subscription window and show nothing.
 - Set `SHAR_CLAUDE_USAGE=0` to turn this off entirely (no Keychain reads, no requests).
 
