@@ -15,8 +15,9 @@ import {
   formatSurplusUsage,
   getClaudeUsage,
   getSurplusUsage,
+  parseClaudeUsageText,
   readOAuthCredential,
-  surplusModelId
+  refreshUsage
 } from "../src/usage.js";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");
@@ -269,7 +270,7 @@ test("claudeUsageLabels covers subscription and account profiles only and can be
   const profiles = [
     { name: "foundry", kind: "foundry", label: "Foundry" },
     { name: "subscription", kind: "subscription", label: "Personal subscription" },
-    { name: "glm", kind: "claudish", label: "GLM" },
+    { name: "glm", kind: "surplus", model: "glm-5.3", label: "GLM" },
     { name: "sub2", kind: "account", label: "sub2" }
   ];
 
@@ -322,14 +323,6 @@ const SURPLUS_BODY = {
   }
 };
 
-test("surplusModelId extracts the model from Surplus claudish specs only", () => {
-  assert.equal(surplusModelId("surplus-gpt@gpt-6-astra"), "gpt-6-astra");
-  assert.equal(surplusModelId("surplus@glm-5.3"), "glm-5.3");
-  assert.equal(surplusModelId("surplus@glm-5.3:3"), "glm-5.3");
-  assert.equal(surplusModelId("openrouter@vendor/model"), null);
-  assert.equal(surplusModelId(undefined), null);
-});
-
 test("fetchSurplusOverview authenticates with the key and maps per-model measures", async () => {
   const http = fakeFetch(200, SURPLUS_BODY);
   const result = await fetchSurplusOverview({ apiKey: "inf_test", range: "30d", fetcher: http.fetcher });
@@ -376,6 +369,97 @@ test("getSurplusUsage caches for five minutes and backs off after a 429", async 
   assert.equal(limited.calls.length, 1);
 });
 
+const CLAUDE_USAGE_TEXT = [
+  "You are currently using your subscription to power your Claude Code usage",
+  "",
+  "Current session: 66% used · resets Oct 12 at 9:50pm (Asia/Calcutta)",
+  "Current week (all models): 28% used · resets Oct 14 at 2am (Asia/Calcutta)",
+  "Current week (Sonnet only): 5% used · resets Oct 14 at 2am (Asia/Calcutta)",
+  "",
+  "What's contributing to your limits usage?"
+].join("\n");
+
+test("parseClaudeUsageText reads the window lines of Claude Code's /usage", () => {
+  assert.deepEqual(parseClaudeUsageText(CLAUDE_USAGE_TEXT, NOW), {
+    fiveHour: { used: 66, resetsAt: Date.parse("2026-10-12T16:20:00Z") },
+    sevenDay: { used: 28, resetsAt: Date.parse("2026-10-13T20:30:00Z") }
+  });
+
+  // No reset shown, an unknown time zone, and a reset in next January.
+  const odd = parseClaudeUsageText(
+    "Current session: 0% used\nCurrent week (all models): 90% used · resets Jan 2 at 1:05am (UTC)",
+    Date.parse("2026-12-30T12:00:00Z")
+  );
+  assert.deepEqual(odd.fiveHour, { used: 0, resetsAt: null });
+  assert.equal(odd.sevenDay.resetsAt, Date.parse("2027-01-02T01:05:00Z"));
+  assert.equal(
+    parseClaudeUsageText("Current session: 1% used · resets Oct 12 at 9pm (Mars/Base)", NOW).fiveHour.resetsAt,
+    null
+  );
+
+  assert.deepEqual(parseClaudeUsageText("Not logged in · Please run /login", NOW), {
+    fiveHour: null,
+    sevenDay: null
+  });
+});
+
+test("refreshUsage caches what Claude Code's /usage shows for a subscription row", async () => {
+  const configDir = await tempConfigDir();
+  let runs = 0;
+  const runClaudeUsage = async () => {
+    runs += 1;
+    return CLAUDE_USAGE_TEXT;
+  };
+  const account = { name: "sub2", kind: "account" };
+
+  assert.deepEqual(await refreshUsage({ profile: account, configDir, runClaudeUsage, env: {}, now: NOW }), { ok: true });
+
+  // The picker shows the refreshed numbers from the cache without reading the login.
+  const usage = await getClaudeUsage({
+    configDir,
+    name: "sub2",
+    now: NOW + 60_000,
+    env: {},
+    exec: fakeExec({ credential: null }).exec,
+    fetcher: fakeFetch(500).fetcher
+  });
+  assert.equal(usage.status, "ok");
+  assert.equal(usage.fiveHour.used, 66);
+  assert.equal(usage.sevenDay.resetsAt, Date.parse("2026-10-13T20:30:00Z"));
+
+  const loggedOut = await refreshUsage({
+    profile: account,
+    configDir,
+    runClaudeUsage: async () => "Not logged in · Please run /login\n",
+    env: {},
+    now: NOW
+  });
+  assert.deepEqual(loggedOut, { ok: false, message: "Not logged in · Please run /login" });
+
+  const foundry = await refreshUsage({
+    profile: { name: "foundry", kind: "foundry" },
+    configDir,
+    runClaudeUsage,
+    env: {},
+    now: NOW
+  });
+  assert.equal(foundry.ok, false);
+  assert.equal(runs, 1);
+});
+
+test("refreshUsage re-fetches Surplus spend without waiting for the cache", async () => {
+  const configDir = await tempConfigDir();
+  const http = fakeFetch(200, SURPLUS_BODY);
+  const env = { SURPLUS_API_KEY: "inf_test" };
+  await getSurplusUsage({ configDir, apiKey: "inf_test", range: "30d", now: NOW, env, fetcher: http.fetcher });
+
+  const glm = { name: "glm", kind: "surplus", model: "glm-5.3" };
+  const result = await refreshUsage({ profile: glm, configDir, env, now: NOW + 60_000, fetcher: http.fetcher });
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(http.calls.length, 2);
+});
+
 test("formatSurplusUsage shows spend, savings and the saved percentage", () => {
   const usage = {
     status: "ok",
@@ -405,13 +489,13 @@ test("formatSurplusUsage shows spend, savings and the saved percentage", () => {
   assert.equal(formatSurplusUsage("gpt-6-astra", { status: "unavailable" }, "30d", NOW), "");
 });
 
-test("claudeUsageLabels labels Surplus claudish profiles from one overview request", async () => {
+test("claudeUsageLabels labels Surplus profiles from one overview request", async () => {
   const configDir = await tempConfigDir();
   const http = fakeFetch(200, SURPLUS_BODY);
   const profiles = [
-    { name: "astra", kind: "claudish", model: "surplus-gpt@gpt-6-astra", label: "Astra" },
-    { name: "glm", kind: "claudish", model: "surplus@glm-5.3", label: "GLM" },
-    { name: "other", kind: "claudish", model: "openrouter@x/y", label: "Other" }
+    { name: "astra", kind: "surplus", model: "gpt-6-astra", label: "Astra" },
+    { name: "glm", kind: "surplus", model: "glm-5.3", label: "GLM" },
+    { name: "other", kind: "endpoint", label: "Other" }
   ];
 
   const labels = await claudeUsageLabels({

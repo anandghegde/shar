@@ -10,7 +10,7 @@ const options = [
   { name: "sol", label: "Surplus GPT-6.1 Sol", value: "S" }
 ];
 
-function startPicker() {
+function startPicker(extra = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   let written = "";
@@ -18,7 +18,7 @@ function startPicker() {
     written += chunk;
   });
 
-  const result = pickOption({ title: "Launch:", options, input, output });
+  const result = pickOption({ title: "Launch:", options, input, output, ...extra });
   const waitFor = async (text) => {
     for (let i = 0; i < 200 && !written.includes(text); i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -67,4 +67,35 @@ test("pickOption returns null on q and on end of input", async () => {
   await eof.waitFor("Choose");
   eof.input.end();
   assert.equal(await eof.result, null);
+});
+
+test("pickOption refreshes an option on r<N> or r <name> and redraws the list", async () => {
+  const refreshed = [];
+  const picker = startPicker({
+    onRefresh: async (value) => {
+      refreshed.push(value);
+      return options.map((option) => (option.value === value ? { ...option, label: `${option.label} fresh` } : option));
+    }
+  });
+  await picker.waitFor("r<N> refresh");
+
+  picker.input.write("r2\n");
+  await picker.waitFor("Surplus GLM 5.3 fresh");
+  picker.input.write("r sol\n");
+  await picker.waitFor("Surplus GPT-6.1 Sol fresh");
+  picker.input.write("2\n");
+
+  assert.equal(await picker.result, "G");
+  assert.deepEqual(refreshed, ["G", "S"]);
+});
+
+test("pickOption treats r<N> as unknown without a refresh handler", async () => {
+  const picker = startPicker();
+  await picker.waitFor("Choose");
+  assert.doesNotMatch(picker.written(), /refresh/);
+
+  picker.input.write("r2\n");
+  await picker.waitFor("Unknown choice: r2");
+  picker.input.write("q\n");
+  assert.equal(await picker.result, null);
 });

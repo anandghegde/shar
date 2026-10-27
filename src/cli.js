@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { finished } from "node:stream/promises";
 
 import { createStore } from "./store.js";
 import { scanCredentialPaths } from "./watcher.js";
@@ -8,7 +10,7 @@ import { getStatus, start as startDaemon, stop as stopDaemon } from "./daemon.js
 import { pollAllProfiles } from "./quota.js";
 import { installWrappers, pathExport } from "./wrapper.js";
 import { pickOption } from "./picker.js";
-import { claudeUsageLabels } from "./usage.js";
+import { claudeUsageLabels, refreshUsage } from "./usage.js";
 import {
   addClaudeProfile,
   launchClaudeProfile,
@@ -19,6 +21,7 @@ import {
 } from "./claude.js";
 
 const DEFAULT_CONFIG_DIR = join(homedir(), ".config", "shar");
+const CAPTURE_TIMEOUT_MS = 30_000;
 
 export async function run(args, io = process) {
   const command = args[0] ?? (isInteractive(io) ? "pick" : "help");
@@ -364,7 +367,7 @@ async function claudeCommand(store, args, io) {
 async function addClaudeProfileCommand(store, args, settingsPath, io) {
   const usage = [
     "Usage: shar claude add <name> [--label <text>]",
-    "       shar claude add <name> --claudish <model> [--label <text>]",
+    "       shar claude add <name> --surplus <model> [--label <text>]",
     "       printf '%s' '<token>' | shar claude add <name> --url <url> [--model <model>] [--label <text>]"
   ].join("\n");
 
@@ -374,18 +377,18 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
   const flags = {};
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
-    if (!["--label", "--claudish", "--url", "--model"].includes(flag)) throw new Error(usage);
+    if (!["--label", "--surplus", "--url", "--model"].includes(flag)) throw new Error(usage);
     flags[flag.slice(2)] = rest[index + 1];
   }
-  if (flags.claudish && (flags.url || flags.model)) throw new Error(usage);
+  if (flags.surplus && (flags.url || flags.model)) throw new Error(usage);
   if (flags.model && !flags.url) throw new Error(usage);
 
   const configDir = store.paths.root;
   const label = flags.label;
 
-  if (flags.claudish) {
-    await addClaudeProfile({ configDir, name, kind: "claudish", model: flags.claudish, label });
-    io.stdout.write(`added ${name} (claudish ${flags.claudish})\n`);
+  if (flags.surplus) {
+    await addClaudeProfile({ configDir, name, kind: "surplus", model: flags.surplus, label });
+    io.stdout.write(`added ${name} (surplus ${flags.surplus})\n`);
   } else if (flags.url) {
     const token = (await readStdin(io, usage)).trim();
     await addClaudeProfile({
@@ -406,23 +409,70 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
 
 async function pickCommand(store, io) {
   const profiles = await listClaudeProfiles({ configDir: store.paths.root });
-  const usage = await claudeUsageLabels({ profiles, configDir: store.paths.root });
   const labelWidth = Math.max(...profiles.map((candidate) => candidate.label.length));
-  const profile = await pickOption({
-    title: "Launch Claude Code with:",
-    options: profiles.map((candidate) => ({
+  const options = async () => {
+    const usage = await claudeUsageLabels({ profiles, configDir: store.paths.root });
+    return profiles.map((candidate) => ({
       name: candidate.name,
       label: usage.get(candidate.name)
         ? `${candidate.label.padEnd(labelWidth)}  ${usage.get(candidate.name)}`
         : candidate.label,
       value: candidate
-    })),
+    }));
+  };
+  const profile = await pickOption({
+    title: "Launch Claude Code with:",
+    options: await options(),
+    onRefresh: process.env.SHAR_CLAUDE_USAGE === "0" ? undefined : async (candidate) => {
+      await refreshProfileUsage(store, candidate, io);
+      return options();
+    },
     input: io.stdin,
     output: io.stdout
   });
   if (!profile) return;
 
   await launchProfile(store, profile, [], claudeSettingsPath(), io);
+}
+
+async function refreshProfileUsage(store, profile, io) {
+  io.stdout.write(`refreshing ${profile.name}…\n`);
+  try {
+    const result = await refreshUsage({
+      profile,
+      configDir: store.paths.root,
+      runClaudeUsage: () => captureProfile(store, profile, ["-p", "/usage", "--no-session-persistence"], io)
+    });
+    if (!result.ok) io.stderr.write(`shar: could not refresh ${profile.name}: ${result.message}\n`);
+  } catch (error) {
+    io.stderr.write(`shar: could not refresh ${profile.name}: ${error.message}\n`);
+  }
+}
+
+// Runs a profile like launchProfile, but returns its stdout instead of handing it the terminal.
+async function captureProfile(store, profile, claudeArgs, io) {
+  let child;
+  let stdout = "";
+  const result = await launchClaudeProfile({
+    profile,
+    args: claudeArgs,
+    configDir: store.paths.root,
+    settingsPath: claudeSettingsPath(),
+    claudeJsonPath: process.env.SHAR_CLAUDE_JSON ?? join(homedir(), ".claude.json"),
+    warn: (message) => io.stderr.write(`shar: ${message}\n`),
+    spawnProcess: (command, args, options) => {
+      child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "inherit"], timeout: CAPTURE_TIMEOUT_MS });
+      child.stdout.setEncoding("utf8").on("data", (chunk) => {
+        stdout += chunk;
+      });
+      return child;
+    }
+  });
+  // "exit" can fire before the pipe has drained.
+  await finished(child.stdout).catch(() => {});
+  if (result.signal) throw new Error(`claude ${claudeArgs.join(" ")} stopped by ${result.signal}`);
+  if (result.code !== 0) throw new Error(`claude ${claudeArgs.join(" ")} exited with ${result.code}`);
+  return stdout;
 }
 
 async function launchProfile(store, profile, claudeArgs, settingsPath, io) {

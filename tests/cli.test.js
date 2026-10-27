@@ -479,36 +479,40 @@ async function makeFakeBinary(dir, name, body) {
   return path;
 }
 
-test("shar claude add registers a claudish profile that list shows", async () => {
+test("shar claude add registers a surplus profile that list shows", async () => {
   const configDir = await makeTempRoot();
 
   const add = await runShar(
-    ["claude", "add", "glm", "--claudish", "surplus@glm-5.3", "--label", "Surplus GLM 5.3"],
+    ["claude", "add", "glm", "--surplus", "glm-5.3", "--label", "Surplus GLM 5.3"],
     configDir
   );
   assert.equal(add.status, 0);
-  assert.match(add.stdout, /added glm \(claudish surplus@glm-5\.3\)/);
+  assert.match(add.stdout, /added glm \(surplus glm-5\.3\)/);
 
   const list = await runShar(["claude", "list"], configDir);
   assert.equal(
     list.stdout,
     "foundry\tfoundry\tFoundry\n" +
       "subscription\tsubscription\tPersonal subscription\n" +
-      "glm\tclaudish\tSurplus GLM 5.3\n"
+      "glm\tsurplus\tSurplus GLM 5.3\n"
   );
 });
 
-test("shar claude <claudish profile> launches claudish with the model and extra args", async () => {
+test("shar claude <surplus profile> launches claude against Surplus with extra args", async () => {
   const configDir = await makeTempRoot();
-  const claudish = await makeFakeBinary(configDir, "fake-claudish", `printf '%s\\n' "$@"`);
-  await runShar(["claude", "add", "glm", "--claudish", "surplus@glm-5.3"], configDir);
+  const claude = await makeFakeBinary(configDir, "fake-claude", `tr -d ' \\n' < "$2"; echo; shift 2; printf '%s\\n' "$@"`);
+  await runShar(["claude", "add", "glm", "--surplus", "glm-5.3"], configDir);
 
   const result = await runShar(["claude", "glm", "-p", "hi"], configDir, {
-    SHAR_REAL_CLAUDISH: claudish
+    SHAR_REAL_CLAUDE: claude,
+    SURPLUS_API_KEY: "inf_test"
   });
 
   assert.equal(result.status, 0);
-  assert.equal(result.stdout, "-m\nsurplus@glm-5.3\n-p\nhi\n");
+  assert.match(result.stdout, /"ANTHROPIC_BASE_URL":"https:\/\/api\.surplusintelligence\.ai\/anthropic"/);
+  assert.match(result.stdout, /"ANTHROPIC_AUTH_TOKEN":"inf_test"/);
+  assert.match(result.stdout, /"ANTHROPIC_MODEL":"glm-5\.3"/);
+  assert.match(result.stdout, /\n-p\nhi\n$/);
 });
 
 test("shar claude add reads an endpoint token from stdin and rejects a missing one", async () => {
@@ -543,7 +547,7 @@ test("shar claude account launches claude in its own config dir with user MCP se
   const claude = await makeFakeBinary(
     configDir,
     "fake-claude",
-    `echo "dir=$CLAUDE_CONFIG_DIR"\necho "first=\${1%%=*}"\necho "mcp=$(tr -d ' \\n' < "\${1#*=}")"`
+    `echo "dir=$CLAUDE_CONFIG_DIR"\necho "memory=$(tr -d ' \\n' < "$2")"\nshift 2\necho "first=\${1%%=*}"\necho "mcp=$(tr -d ' \\n' < "\${1#*=}")"`
   );
   const env = {
     SHAR_CLAUDE_SETTINGS: settingsPath,
@@ -558,6 +562,7 @@ test("shar claude account launches claude in its own config dir with user MCP se
   const result = await runShar(["claude", "sub2"], configDir, env);
   assert.equal(result.status, 0);
   assert.match(result.stdout, new RegExp(`dir=${join(configDir, "claude", "accounts", "sub2")}\\n`));
+  assert.match(result.stdout, /memory=\{"autoMemoryDirectory":"[^"]*\/claude-memory\/[^"/]+"\}\n/);
   assert.match(result.stdout, /first=--mcp-config\n/);
   assert.match(result.stdout, /mcp=\{"mcpServers":\{"mem0":\{"command":"mem0-mcp"\}\}\}/);
 });

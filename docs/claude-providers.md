@@ -65,7 +65,7 @@ The Foundry command applies the protected overlay with Claude Code's `--settings
 Beyond `foundry` and `subscription`, shar keeps a registry of named Claude profiles in `~/.config/shar/claude/profiles.json`. Add one with `shar claude add`, then launch it by name:
 
 ```sh
-shar claude add glm --claudish surplus@glm-5.3 --label "Surplus GLM 5.3"
+shar claude add glm --surplus glm-5.3 --label "Surplus GLM 5.3"
 shar claude add sub2                                   # second subscription
 printf '%s' "$TOKEN" | shar claude add litellm --url https://llm.example.test --model gpt-x
 
@@ -80,7 +80,7 @@ Profile kinds:
 | Kind | Added with | Launches |
 |---|---|---|
 | `foundry` / `subscription` | built in | as described above |
-| `claudish` | `--claudish <model>` | `claudish -m <model> [args]`. Foundry env is stripped so the claudish proxy is respected; other env (such as provider API keys) is inherited. |
+| `surplus` | `--surplus <model>` | `claude` against Surplus's Anthropic-compatible API (`https://api.surplusintelligence.ai/anthropic`), with `SURPLUS_API_KEY` as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` blanked, and every model slot (main, small/fast, opus/sonnet/haiku, subagent) pinned to `<model>`. The key is read from the environment at launch and only written to the temporary `--settings` file. |
 | `account` | no flags | `claude` with `CLAUDE_CONFIG_DIR=~/.config/shar/claude/accounts/<name>` |
 | `endpoint` | `--url`, token on stdin | `claude --settings <name>.settings.json` (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, optional `ANTHROPIC_MODEL`), mode `0600` |
 
@@ -102,6 +102,14 @@ Notes:
 - Links are re-synced on every launch, so new `~/.claude` entries appear automatically. If Claude replaces the linked `settings.json` or `CLAUDE.md` with a real file, shar keeps it as `<name>.shar-conflict` and re-links.
 - `settings.json` is shared, so an account launch refuses to run while `~/.claude/settings.json` overrides subscription auth (for example after `shar switch claude foundry`). Run `shar switch claude subscription` or `shar claude setup` first.
 
+### Auto memory
+
+Every launch from shar (`foundry`, `subscription`, `account`, `endpoint` and `surplus`) keeps auto memory in `~/claude-memory/<project>/`, so all profiles share one memory per project. `<project>` is named like Claude Code's own `~/.claude/projects/<project>` folders: the git repository root (the main checkout for worktrees), or the working directory outside a repo, with every non-alphanumeric character replaced by `-`.
+
+Claude Code's default location doesn't work for accounts. The path runs through the account's `projects` symlink into `~/.claude`, which is a protected path, so every memory write asks for approval, even in auto mode.
+
+shar sets this through `autoMemoryDirectory`. A second `--settings` flag replaces the first, so each launch writes one temporary `--settings` file (mode `0600`, deleted on exit) holding the profile's overlay, if it has one, plus `autoMemoryDirectory`. Bare `claude` keeps the default location.
+
 ### Usage in the picker
 
 For `subscription` and `account` profiles the picker shows what is left in the 5-hour and 7-day windows and when each resets:
@@ -114,13 +122,13 @@ How it works, and what to know before relying on it:
 
 - shar reads the profile's OAuth token from the macOS Keychain (`Claude Code-credentials`, or `Claude Code-credentials-<sha256(dir)[:8]>` for accounts) and calls the undocumented `GET api.anthropic.com/api/oauth/usage`, the same data `/usage` shows. macOS may ask once to let `security` read each item. Where there is no Keychain (Linux), it reads `<config dir>/.credentials.json` instead (`~/.claude/.credentials.json`, or the account dir).
 - Requests send `User-Agent: claude-code/<installed version>`; without it the endpoint is rate-limited aggressively. Results are cached for 3 minutes in `~/.config/shar/claude/usage/<profile>.json` (`0600`), and a 429 backs off for 5 minutes.
-- Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(refreshes on launch, as of 3h ago)`. `(login expired)` means the refresh token is gone too and the profile needs `/login`. A window whose reset time has passed is shown as `100% left`.
-- Foundry and claudish options have no subscription window and show nothing.
+- Access tokens last about an hour and are only refreshed while Claude Code runs. shar never refreshes tokens itself, so an idle profile shows its last-known numbers as `(refreshes on launch, as of 3h ago)`. To refresh one row on demand, type `r<N>` or `r <name>` at the prompt. For subscription and account rows shar runs that profile's own `claude -p /usage --no-session-persistence`. That is a local command with no model call, so it uses no tokens and does not start a 5-hour window, and the login stays with Claude Code. shar keeps the numbers it prints as that row's last-known usage. Surplus rows re-fetch without waiting for the cache. `(login expired)` means the refresh token is gone too and the profile needs `/login`. A window whose reset time has passed is shown as `100% left`.
+- Foundry and endpoint options have no subscription window and show nothing.
 - Set `SHAR_CLAUDE_USAGE=0` to turn this off entirely (no Keychain reads, no requests).
 
 #### Surplus options
 
-claudish profiles whose model spec starts with `surplus` (`surplus@glm-5.3`, `surplus-gpt@gpt-6-astra`) show what you have spent on that model and what it saved against direct provider pricing, from Surplus's documented `GET /v1/buyer/overview` API:
+`surplus` profiles show what you have spent on that model and what it saved against direct provider pricing, from Surplus's documented `GET /v1/buyer/overview` API:
 
 ```
   3) glm    Surplus GLM 5.3      30d $4.18 spent · $145.21 saved (97%)

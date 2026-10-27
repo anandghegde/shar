@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   lstat,
   mkdir,
@@ -12,7 +12,11 @@ import {
   unlink,
   writeFile
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const BUILTIN_PROFILES = Object.freeze([
   Object.freeze({ name: "foundry", kind: "foundry", label: "Foundry" }),
@@ -49,6 +53,18 @@ const SUBSCRIPTION_AUTH_OVERRIDES = new Set([
   "CLAUDE_CODE_USE_FOUNDRY",
   "CLAUDE_CODE_USE_VERTEX"
 ]);
+
+// Surplus's Anthropic-compatible API, so plain claude can run its catalog models.
+const SURPLUS_ANTHROPIC_URL = "https://api.surplusintelligence.ai/anthropic";
+// Every slot is pinned, or background and subagent calls would ask Surplus for Claude models.
+const SURPLUS_MODEL_SLOTS = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "CLAUDE_CODE_SUBAGENT_MODEL"
+];
 
 export function foundrySettingsPath(configDir) {
   return join(configDir, "claude", "foundry.settings.json");
@@ -161,13 +177,15 @@ export async function launchClaude({
   configDir,
   settingsPath,
   env = process.env,
+  cwd = process.cwd(),
+  memoryRoot = defaultMemoryRoot(),
   spawnProcess = spawn
 }) {
   const command = env.SHAR_REAL_CLAUDE ?? "claude";
   const childEnv = { ...env };
   delete childEnv.SHAR_REAL_CLAUDE;
 
-  let childArgs = args;
+  let settings = {};
   if (provider === "foundry") {
     const overlayPath = foundrySettingsPath(configDir);
     if (!(await exists(overlayPath))) {
@@ -176,7 +194,7 @@ export async function launchClaude({
     for (const key of SUBSCRIPTION_AUTH_OVERRIDES) {
       if (key !== "CLAUDE_CODE_USE_FOUNDRY") delete childEnv[key];
     }
-    childArgs = ["--settings", overlayPath, ...args];
+    settings = await readSettings(overlayPath);
   } else if (provider === "subscription") {
     await assertSubscriptionSettings(settingsPath);
     for (const key of Object.keys(childEnv)) {
@@ -186,7 +204,16 @@ export async function launchClaude({
     throw new Error(`Unknown Claude provider: ${provider}`);
   }
 
-  return runChild(command, childArgs, childEnv, spawnProcess);
+  return runClaude({
+    command,
+    args,
+    env: childEnv,
+    spawnProcess,
+    configDir,
+    name: provider,
+    settings,
+    memoryDir: await projectMemoryDir(cwd, memoryRoot)
+  });
 }
 
 export function claudeProfilesPath(configDir) {
@@ -236,8 +263,8 @@ export async function addClaudeProfile({
   const entry = { kind };
   if (label) entry.label = label;
 
-  if (kind === "claudish") {
-    if (!model) throw new Error("Claudish profiles require a model");
+  if (kind === "surplus") {
+    if (!model) throw new Error("Surplus profiles require a model");
     entry.model = model;
   } else if (kind === "endpoint") {
     if (!url) throw new Error("Endpoint profiles require a URL");
@@ -266,31 +293,47 @@ export async function launchClaudeProfile({
   claudeJsonPath,
   warn = () => {},
   env = process.env,
+  cwd = process.cwd(),
+  memoryRoot = defaultMemoryRoot(),
   spawnProcess = spawn
 }) {
   if (profile.kind === "foundry" || profile.kind === "subscription") {
-    return launchClaude({ provider: profile.kind, args, configDir, settingsPath, env, spawnProcess });
+    return launchClaude({
+      provider: profile.kind,
+      args,
+      configDir,
+      settingsPath,
+      env,
+      cwd,
+      memoryRoot,
+      spawnProcess
+    });
   }
 
   const childEnv = { ...env };
-
-  if (profile.kind === "claudish") {
-    const command = childEnv.SHAR_REAL_CLAUDISH ?? "claudish";
-    delete childEnv.SHAR_REAL_CLAUDISH;
-    deleteEnvWhere(childEnv, isFoundryEnvKey);
-    return runChild(command, ["-m", profile.model, ...args], childEnv, spawnProcess);
-  }
-
   const command = childEnv.SHAR_REAL_CLAUDE ?? "claude";
   delete childEnv.SHAR_REAL_CLAUDE;
   deleteEnvWhere(childEnv, isProviderEnvKey);
+  const launch = {
+    command,
+    env: childEnv,
+    spawnProcess,
+    configDir,
+    name: profile.name,
+    memoryDir: await projectMemoryDir(cwd, memoryRoot)
+  };
+
+  if (profile.kind === "surplus") {
+    if (!env.SURPLUS_API_KEY) throw new Error("Surplus profiles need SURPLUS_API_KEY in the environment");
+    return runClaude({ ...launch, args, settings: { env: surplusEnv(env.SURPLUS_API_KEY, profile.model) } });
+  }
 
   if (profile.kind === "endpoint") {
     const overlayPath = claudeEndpointSettingsPath(configDir, profile.name);
     if (!(await exists(overlayPath))) {
       throw new Error(`Claude endpoint is not configured: ${profile.name}`);
     }
-    return runChild(command, ["--settings", overlayPath, ...args], childEnv, spawnProcess);
+    return runClaude({ ...launch, args, settings: await readSettings(overlayPath) });
   }
 
   if (profile.kind === "account") {
@@ -310,7 +353,7 @@ export async function launchClaudeProfile({
     try {
       // --mcp-config is variadic; the = form keeps it from swallowing later args.
       const childArgs = mcpConfigPath ? [`--mcp-config=${mcpConfigPath}`, ...args] : args;
-      return await runChild(command, childArgs, childEnv, spawnProcess);
+      return await runClaude({ ...launch, args: childArgs });
     } finally {
       if (mcpConfigPath) await rm(mcpConfigPath, { force: true });
     }
@@ -395,6 +438,51 @@ function runChild(command, args, env, spawnProcess) {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
+}
+
+// A second --settings flag replaces the first, so the profile's settings and the
+// per-project auto memory directory go to claude as one temporary file.
+async function runClaude({ command, args, env, spawnProcess, configDir, name, settings = {}, memoryDir }) {
+  const path = join(configDir, "claude", "run", `${name}-${process.pid}.settings.json`);
+  await writeJson(path, { ...settings, autoMemoryDirectory: memoryDir });
+  try {
+    return await runChild(command, ["--settings", path, ...args], env, spawnProcess);
+  } finally {
+    await rm(path, { force: true });
+  }
+}
+
+function surplusEnv(token, model) {
+  // A blank API key keeps a cached one from overriding the Surplus token.
+  const env = { ANTHROPIC_BASE_URL: SURPLUS_ANTHROPIC_URL, ANTHROPIC_AUTH_TOKEN: token, ANTHROPIC_API_KEY: "" };
+  for (const key of SURPLUS_MODEL_SLOTS) env[key] = model;
+  return env;
+}
+
+function defaultMemoryRoot() {
+  return join(homedir(), "claude-memory");
+}
+
+// One folder per project, named like Claude Code's own projects/<project> folders.
+// The default location resolves through the account symlinks into ~/.claude, a
+// protected path where every memory write needs approval, even in auto mode.
+async function projectMemoryDir(cwd, memoryRoot) {
+  return join(memoryRoot, (await projectRoot(cwd)).replace(/[^a-zA-Z0-9]/g, "-"));
+}
+
+// Subdirectories and worktrees share the main checkout's memory, as in Claude Code.
+async function projectRoot(cwd) {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+      { cwd }
+    );
+    const [commonDir, topLevel] = stdout.trim().split("\n");
+    return basename(commonDir) === ".git" ? dirname(commonDir) : topLevel;
+  } catch {
+    return cwd;
+  }
 }
 
 function deleteEnvWhere(env, predicate) {

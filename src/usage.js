@@ -17,6 +17,9 @@ const SURPLUS_CACHE_TTL_MS = 5 * 60 * 1000;
 // /buyer/overview only breaks usage down by model for these ranges.
 const SURPLUS_RANGES = new Set(["7d", "30d"]);
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 // Claude Code keys its Keychain entry to CLAUDE_CONFIG_DIR when that variable is set.
 export function claudeKeychainService(claudeConfigDir) {
   if (!claudeConfigDir) return "Claude Code-credentials";
@@ -142,10 +145,50 @@ export async function getClaudeUsage({
   return { status: result.status, ...last };
 }
 
-// "surplus-gpt@gpt-6-astra" -> "gpt-6-astra"; null for non-Surplus specs.
-export function surplusModelId(spec) {
-  const match = /^surplus[\w-]*@([^:]+)/.exec(spec ?? "");
-  return match ? match[1] : null;
+// Reads the window lines of Claude Code's `/usage` text, e.g.
+// "Current session: 66% used · resets Oct 17 at 3:50pm (Asia/Calcutta)".
+export function parseClaudeUsageText(text, now = Date.now()) {
+  const window = (title) => {
+    const line = text.split("\n").find((candidate) => candidate.startsWith(`${title}: `));
+    const match = /: (\d+)% used(?: · resets (.+))?$/.exec(line ?? "");
+    return match ? { used: Number(match[1]), resetsAt: parseResetTime(match[2], now) } : null;
+  };
+  return { fiveHour: window("Current session"), sevenDay: window("Current week (all models)") };
+}
+
+// On-demand refresh of one picker row. Subscriptions run Claude Code's own `/usage`, a local
+// command with no model call, so it spends no tokens and leaves the login to Claude Code.
+export async function refreshUsage({
+  profile,
+  configDir,
+  runClaudeUsage,
+  env = process.env,
+  now = Date.now(),
+  fetcher
+}) {
+  if (profile.kind === "subscription" || profile.kind === "account") {
+    const text = await runClaudeUsage();
+    const { fiveHour, sevenDay } = parseClaudeUsageText(text, now);
+    if (!fiveHour && !sevenDay) return { ok: false, message: text.trim().split("\n")[0] || "no usage shown" };
+    const cachePath = join(configDir, "claude", "usage", `${profile.name}.json`);
+    await writeCache(cachePath, { fiveHour, sevenDay, fetchedAt: now });
+    return { ok: true };
+  }
+
+  if (profile.kind === "surplus" && env.SURPLUS_API_KEY) {
+    const usage = await getSurplusUsage({
+      configDir,
+      apiKey: env.SURPLUS_API_KEY,
+      range: surplusRange(env),
+      now,
+      env,
+      fetcher,
+      force: true
+    });
+    return usage.status === "ok" ? { ok: true } : { ok: false, message: usage.status };
+  }
+
+  return { ok: false, message: "no usage to refresh" };
 }
 
 export async function fetchSurplusOverview({
@@ -185,13 +228,14 @@ export async function getSurplusUsage({
   range,
   now = Date.now(),
   env = process.env,
-  fetcher = fetch
+  fetcher = fetch,
+  force = false
 }) {
   const cachePath = join(configDir, "claude", "usage", `surplus-${range}.json`);
   const cache = await readCache(cachePath);
   const last = cache ? { models: cache.models, fetchedAt: cache.fetchedAt } : {};
 
-  if (cache?.fetchedAt && now - cache.fetchedAt < SURPLUS_CACHE_TTL_MS) return { status: "ok", ...last };
+  if (!force && cache?.fetchedAt && now - cache.fetchedAt < SURPLUS_CACHE_TTL_MS) return { status: "ok", ...last };
   if (cache?.backoffUntil > now) return { status: "limited", ...last };
 
   let result;
@@ -290,11 +334,9 @@ export async function claudeUsageLabels({
       }
     });
 
-  const surplusProfiles = profiles.filter(
-    (profile) => profile.kind === "claudish" && surplusModelId(profile.model)
-  );
+  const surplusProfiles = profiles.filter((profile) => profile.kind === "surplus");
   if (surplusProfiles.length > 0 && env.SURPLUS_API_KEY) {
-    const range = SURPLUS_RANGES.has(env.SHAR_SURPLUS_RANGE) ? env.SHAR_SURPLUS_RANGE : "30d";
+    const range = surplusRange(env);
     lookups.push((async () => {
       try {
         const usage = await getSurplusUsage({
@@ -306,10 +348,7 @@ export async function claudeUsageLabels({
           fetcher
         });
         for (const profile of surplusProfiles) {
-          labels.set(
-            profile.name,
-            formatSurplusUsage(surplusModelId(profile.model), usage, range, now)
-          );
+          labels.set(profile.name, formatSurplusUsage(profile.model, usage, range, now));
         }
       } catch {
         // Usage is decoration; never block the picker.
@@ -331,6 +370,45 @@ async function claudeVersion({ env, exec }) {
     timeout: REQUEST_TIMEOUT_MS
   });
   return stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? "0.0.0";
+}
+
+function surplusRange(env) {
+  return SURPLUS_RANGES.has(env.SHAR_SURPLUS_RANGE) ? env.SHAR_SURPLUS_RANGE : "30d";
+}
+
+// "Oct 17 at 3:50pm (Asia/Calcutta)" -> epoch ms; null for an unfamiliar format or time zone.
+function parseResetTime(text, now) {
+  const match = /^([A-Z][a-z]{2}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?([ap]m) \(([^)]+)\)$/.exec(text ?? "");
+  const month = MONTHS.indexOf(match?.[1]);
+  if (month < 0) return null;
+
+  const [, , day, hour, minute = "0", meridiem, timeZone] = match;
+  const hours = (Number(hour) % 12) + (meridiem === "pm" ? 12 : 0);
+  const at = (year) => zonedTime(timeZone, year, month, Number(day), hours, Number(minute));
+  try {
+    const year = Number(new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).format(now));
+    // Resets lie ahead, so a date already past this year belongs to next year.
+    return at(year) < now - DAY_MS ? at(year + 1) : at(year);
+  } catch {
+    return null;
+  }
+}
+
+// Epoch ms of a wall-clock time in an IANA time zone.
+function zonedTime(timeZone, year, month, day, hour, minute) {
+  const wall = Date.UTC(year, month, day, hour, minute);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric"
+    }).formatToParts(wall).map(({ type, value }) => [type, Number(value)])
+  );
+  return wall - (Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) - wall);
 }
 
 function formatDollars(micro) {

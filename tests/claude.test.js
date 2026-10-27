@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFileSync, statSync } from "node:fs";
-import { mkdir, readFile, readdir, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -34,7 +35,9 @@ function spawnRecorder(exitCode = 0) {
   return {
     calls,
     spawnProcess(command, args, options) {
-      calls.push({ command, args, options });
+      // The --settings file is deleted on exit, so read it while claude "runs".
+      const settings = args[0] === "--settings" ? JSON.parse(readFileSync(args[1], "utf8")) : undefined;
+      calls.push({ command, args, options, settings });
       const child = new EventEmitter();
       queueMicrotask(() => child.emit("exit", exitCode, null));
       return child;
@@ -124,7 +127,9 @@ test("launchClaude starts Foundry with the protected settings overlay", async ()
 
   assert.deepEqual(result, { code: 0, signal: null });
   assert.equal(recorder.calls[0].command, "/test/bin/claude");
-  assert.deepEqual(recorder.calls[0].args, ["--settings", overlayPath, "--continue"]);
+  assert.equal(recorder.calls[0].args[0], "--settings");
+  assert.deepEqual(recorder.calls[0].args.slice(2), ["--continue"]);
+  assert.deepEqual(recorder.calls[0].settings.env, { CLAUDE_CODE_USE_FOUNDRY: "1" });
   assert.equal(recorder.calls[0].options.env.KEEP_VALUE, "yes");
   assert.equal(recorder.calls[0].options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(recorder.calls[0].options.env.SHAR_REAL_CLAUDE, undefined);
@@ -151,7 +156,7 @@ test("launchClaude starts subscription auth without inherited provider or API ov
     spawnProcess: recorder.spawnProcess
   });
 
-  assert.deepEqual(recorder.calls[0].args, ["auth", "status"]);
+  assert.deepEqual(recorder.calls[0].args.slice(2), ["auth", "status"]);
   assert.equal(recorder.calls[0].options.env.KEEP_VALUE, "yes");
   assert.equal(recorder.calls[0].options.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
   assert.equal(recorder.calls[0].options.env.ANTHROPIC_FOUNDRY_API_KEY, undefined);
@@ -237,31 +242,31 @@ test("addClaudeProfile registers profiles listed after the built-ins", async () 
   await addClaudeProfile({
     configDir,
     name: "glm",
-    kind: "claudish",
-    model: "surplus@glm-5.3",
+    kind: "surplus",
+    model: "glm-5.3",
     label: "Surplus GLM 5.3"
   });
-  await addClaudeProfile({ configDir, name: "sol", kind: "claudish", model: "surplus-gpt@gpt-6.1-sol" });
+  await addClaudeProfile({ configDir, name: "sol", kind: "surplus", model: "gpt-6.1-sol" });
 
   const profiles = await listClaudeProfiles({ configDir });
   assert.deepEqual(profiles.map((p) => p.name), ["foundry", "subscription", "glm", "sol"]);
   assert.equal(profiles[2].label, "Surplus GLM 5.3");
   assert.equal(profiles[3].label, "sol");
-  assert.equal(profiles[3].model, "surplus-gpt@gpt-6.1-sol");
+  assert.equal(profiles[3].model, "gpt-6.1-sol");
   assert.equal((await stat(claudeProfilesPath(configDir))).mode & 0o777, 0o600);
 });
 
 test("addClaudeProfile rejects reserved, invalid, duplicate and incomplete profiles", async () => {
   const { configDir } = await makeFixture();
-  const claudish = { kind: "claudish", model: "surplus@glm-5.3" };
+  const surplus = { kind: "surplus", model: "glm-5.3" };
 
-  await assert.rejects(() => addClaudeProfile({ configDir, name: "foundry", ...claudish }), /reserved/);
-  await assert.rejects(() => addClaudeProfile({ configDir, name: "add", ...claudish }), /reserved/);
-  await assert.rejects(() => addClaudeProfile({ configDir, name: "../x", ...claudish }), /Invalid/);
-  await addClaudeProfile({ configDir, name: "glm", ...claudish });
-  await assert.rejects(() => addClaudeProfile({ configDir, name: "glm", ...claudish }), /already exists/);
+  await assert.rejects(() => addClaudeProfile({ configDir, name: "foundry", ...surplus }), /reserved/);
+  await assert.rejects(() => addClaudeProfile({ configDir, name: "add", ...surplus }), /reserved/);
+  await assert.rejects(() => addClaudeProfile({ configDir, name: "../x", ...surplus }), /Invalid/);
+  await addClaudeProfile({ configDir, name: "glm", ...surplus });
+  await assert.rejects(() => addClaudeProfile({ configDir, name: "glm", ...surplus }), /already exists/);
   await assert.rejects(
-    () => addClaudeProfile({ configDir, name: "nomodel", kind: "claudish" }),
+    () => addClaudeProfile({ configDir, name: "nomodel", kind: "surplus" }),
     /require a model/
   );
   await assert.rejects(
@@ -280,31 +285,48 @@ test("resolveClaudeProfile finds built-ins and rejects unknown names", async () 
   );
 });
 
-test("launchClaudeProfile runs claudish with the model and drops Foundry env", async () => {
+test("surplus profiles launch claude on Surplus's Anthropic API with every model slot pinned", async () => {
   const { configDir, settingsPath } = await makeFixture();
   const recorder = spawnRecorder();
+  const profile = { name: "glm", kind: "surplus", model: "glm-5.3" };
 
   await launchClaudeProfile({
-    profile: { name: "glm", kind: "claudish", model: "surplus@glm-5.3" },
+    profile,
     args: ["-p", "hi"],
     configDir,
     settingsPath,
     env: {
-      SHAR_REAL_CLAUDISH: "/test/bin/claudish",
+      SHAR_REAL_CLAUDE: "/test/bin/claude",
+      SURPLUS_API_KEY: "inf_test",
+      ANTHROPIC_API_KEY: "generic",
       CLAUDE_CODE_USE_FOUNDRY: "1",
-      ANTHROPIC_FOUNDRY_API_KEY: "foundry-key",
-      SURPLUS_API_KEY: "keep"
+      ANTHROPIC_FOUNDRY_API_KEY: "foundry-key"
     },
     spawnProcess: recorder.spawnProcess
   });
 
   const [call] = recorder.calls;
-  assert.equal(call.command, "/test/bin/claudish");
-  assert.deepEqual(call.args, ["-m", "surplus@glm-5.3", "-p", "hi"]);
-  assert.equal(call.options.env.SURPLUS_API_KEY, "keep");
+  assert.equal(call.command, "/test/bin/claude");
+  assert.deepEqual(call.args.slice(2), ["-p", "hi"]);
+  assert.deepEqual(call.settings.env, {
+    ANTHROPIC_BASE_URL: "https://api.surplusintelligence.ai/anthropic",
+    ANTHROPIC_AUTH_TOKEN: "inf_test",
+    ANTHROPIC_API_KEY: "",
+    ANTHROPIC_MODEL: "glm-5.3",
+    ANTHROPIC_SMALL_FAST_MODEL: "glm-5.3",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.3",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.3",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.3",
+    CLAUDE_CODE_SUBAGENT_MODEL: "glm-5.3"
+  });
+  assert.equal(call.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(call.options.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
   assert.equal(call.options.env.ANTHROPIC_FOUNDRY_API_KEY, undefined);
-  assert.equal(call.options.env.SHAR_REAL_CLAUDISH, undefined);
+
+  await assert.rejects(
+    () => launchClaudeProfile({ profile, configDir, settingsPath, env: {}, spawnProcess: recorder.spawnProcess }),
+    /SURPLUS_API_KEY/
+  );
 });
 
 test("launchClaudeProfile delegates built-in kinds to the existing providers", async () => {
@@ -322,8 +344,44 @@ test("launchClaudeProfile delegates built-in kinds to the existing providers", a
   });
 
   assert.equal(recorder.calls[0].command, "/test/bin/claude");
-  assert.deepEqual(recorder.calls[0].args, ["--continue"]);
+  assert.deepEqual(recorder.calls[0].args.slice(2), ["--continue"]);
   assert.equal(recorder.calls[0].options.env.ANTHROPIC_API_KEY, undefined);
+});
+
+test("launches keep auto memory in one folder per project under the memory root", async () => {
+  const { root, configDir, settingsPath } = await makeFixture();
+  await writeFile(settingsPath, "{}");
+  const memoryRoot = join(root, "claude-memory");
+  const repo = join(root, "repo");
+  const plain = join(root, "plain");
+  await mkdir(join(repo, "src"), { recursive: true });
+  await mkdir(plain);
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "init");
+  git("worktree", "add", "-q", join(root, "worktree"));
+
+  const launchIn = async (cwd) => {
+    const recorder = spawnRecorder();
+    await launchClaudeProfile({
+      profile: { name: "subscription", kind: "subscription" },
+      configDir,
+      settingsPath,
+      env: { SHAR_REAL_CLAUDE: "/test/bin/claude" },
+      cwd,
+      memoryRoot,
+      spawnProcess: recorder.spawnProcess
+    });
+    const [call] = recorder.calls;
+    await assert.rejects(() => stat(call.args[1]), { code: "ENOENT" });
+    return call.settings.autoMemoryDirectory;
+  };
+
+  const repoMemory = join(memoryRoot, (await realpath(repo)).replace(/[^a-zA-Z0-9]/g, "-"));
+  assert.equal(await launchIn(repo), repoMemory);
+  assert.equal(await launchIn(join(repo, "src")), repoMemory);
+  assert.equal(await launchIn(join(root, "worktree")), repoMemory);
+  assert.equal(await launchIn(plain), join(memoryRoot, plain.replace(/[^a-zA-Z0-9]/g, "-")));
 });
 
 test("endpoint profiles keep a private overlay and launch claude with it", async () => {
@@ -364,7 +422,13 @@ test("endpoint profiles keep a private overlay and launch claude with it", async
 
   const [call] = recorder.calls;
   assert.equal(call.command, "/test/bin/claude");
-  assert.deepEqual(call.args, ["--settings", overlayPath, "chat"]);
+  assert.equal(call.args[0], "--settings");
+  assert.deepEqual(call.args.slice(2), ["chat"]);
+  assert.deepEqual(call.settings.env, {
+    ANTHROPIC_BASE_URL: "https://llm.example.test",
+    ANTHROPIC_AUTH_TOKEN: "endpoint-token",
+    ANTHROPIC_MODEL: "gpt-x"
+  });
   assert.equal(call.options.env.KEEP_VALUE, "yes");
   assert.equal(call.options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(call.options.env.CLAUDE_CODE_USE_FOUNDRY, undefined);
@@ -394,7 +458,7 @@ test("account launch isolates CLAUDE_CONFIG_DIR and hands over user MCP servers"
   const seen = {};
   const spawnProcess = (command, args, options) => {
     calls.push({ command, args, options });
-    seen.path = args[0].slice("--mcp-config=".length);
+    seen.path = args[2].slice("--mcp-config=".length);
     seen.mcp = JSON.parse(readFileSync(seen.path, "utf8"));
     seen.mode = readFileSyncMode(seen.path);
     const child = new EventEmitter();
@@ -419,8 +483,9 @@ test("account launch isolates CLAUDE_CONFIG_DIR and hands over user MCP servers"
 
   const [call] = calls;
   assert.equal(call.command, "/test/bin/claude");
-  assert.ok(call.args[0].startsWith("--mcp-config="));
-  assert.equal(call.args[1], "--continue");
+  assert.equal(call.args[0], "--settings");
+  assert.ok(call.args[2].startsWith("--mcp-config="));
+  assert.equal(call.args[3], "--continue");
   assert.equal(call.options.env.CLAUDE_CONFIG_DIR, claudeAccountDir(configDir, "sub2"));
   assert.equal(call.options.env.KEEP_VALUE, "yes");
   assert.equal(call.options.env.ANTHROPIC_API_KEY, undefined);
@@ -450,7 +515,7 @@ test("account launch skips --mcp-config when no user MCP servers exist", async (
     spawnProcess: recorder.spawnProcess
   });
 
-  assert.deepEqual(recorder.calls[0].args, ["auth", "status"]);
+  assert.deepEqual(recorder.calls[0].args.slice(2), ["auth", "status"]);
 });
 
 test("account launch refuses while user settings override subscription auth", async () => {
