@@ -536,6 +536,35 @@ test("shar claude add reads an endpoint token from stdin and rejects a missing o
   assert.equal(overlay.env.ANTHROPIC_MODEL, "gpt-x");
 });
 
+test("shar claude add stores repeated --env values on an endpoint profile", async () => {
+  const configDir = await makeTempRoot();
+
+  const added = await runShar(
+    ["claude", "add", "wonder", "--url", "https://api.meta.ai", "--model", "muse-wonder-1.0",
+      "--env", "ANTHROPIC_DEFAULT_OPUS_MODEL=muse-wonder-1.0",
+      "--env", "ENABLE_TOOL_SEARCH=true"],
+    configDir,
+    {},
+    "endpoint-token\n"
+  );
+  assert.equal(added.status, 0, added.stderr);
+
+  const overlay = JSON.parse(await readFile(join(configDir, "claude", "wonder.settings.json"), "utf8"));
+  assert.equal(overlay.env.ANTHROPIC_BASE_URL, "https://api.meta.ai");
+  assert.equal(overlay.env.ANTHROPIC_MODEL, "muse-wonder-1.0");
+  assert.equal(overlay.env.ANTHROPIC_DEFAULT_OPUS_MODEL, "muse-wonder-1.0");
+  assert.equal(overlay.env.ENABLE_TOOL_SEARCH, "true");
+
+  const badShape = await runShar(
+    ["claude", "add", "bad", "--url", "https://api.meta.ai", "--env", "MISSING_EQUALS"],
+    configDir,
+    {},
+    "endpoint-token\n"
+  );
+  assert.equal(badShape.status, 1);
+  assert.match(badShape.stderr, /Usage: shar claude add/);
+});
+
 test("shar claude account launches claude in its own config dir with user MCP servers", async () => {
   const configDir = await makeTempRoot();
   const home = join(configDir, "home");

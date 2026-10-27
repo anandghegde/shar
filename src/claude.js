@@ -25,6 +25,9 @@ const BUILTIN_PROFILES = Object.freeze([
 
 const RESERVED_PROFILE_NAMES = new Set(["setup", "switch", "add", "list", "pick"]);
 const PROFILE_NAME = /^[a-z0-9][a-z0-9._-]*$/i;
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Set via --url/--model/stdin instead of --env so there is a single source for each.
+const ENDPOINT_RESERVED_ENV = new Set(["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL"]);
 
 // Account dirs mirror ~/.claude except identity state and dated backups.
 const ACCOUNT_LINK_SKIP = /^\.claude\.json|^\.credentials\.json|(^|\.)(backup|bak)([.-]|$)|^_?backups$/;
@@ -251,7 +254,8 @@ export async function addClaudeProfile({
   label,
   model,
   url,
-  token
+  token,
+  extraEnv
 }) {
   if (!name || !PROFILE_NAME.test(name)) throw new Error(`Invalid Claude profile name: ${name}`);
   if (RESERVED_PROFILE_NAMES.has(name) || BUILTIN_PROFILES.some((p) => p.name === name)) {
@@ -271,6 +275,14 @@ export async function addClaudeProfile({
     if (!token) throw new Error("Endpoint profiles require a token");
     const env = { ANTHROPIC_BASE_URL: url, ANTHROPIC_AUTH_TOKEN: token };
     if (model) env.ANTHROPIC_MODEL = model;
+    for (const [key, value] of Object.entries(extraEnv ?? {})) {
+      if (ENDPOINT_RESERVED_ENV.has(key)) {
+        throw new Error(`Endpoint profile reserves ${key}; use --url, --model, or stdin instead`);
+      }
+      if (!ENV_KEY.test(key)) throw new Error(`Invalid env var name: ${key}`);
+      if (typeof value !== "string") throw new Error(`Invalid env value for ${key}`);
+      env[key] = value;
+    }
     await writeJson(claudeEndpointSettingsPath(configDir, name), { env });
   } else if (kind === "account") {
     await syncAccountLinks({
@@ -333,7 +345,13 @@ export async function launchClaudeProfile({
     if (!(await exists(overlayPath))) {
       throw new Error(`Claude endpoint is not configured: ${profile.name}`);
     }
-    return runClaude({ ...launch, args, settings: await readSettings(overlayPath) });
+    // Inherited vars win over settings.json env, so drop the overlay's keys
+    // from the child environment to keep the endpoint authoritative.
+    const overlay = await readSettings(overlayPath);
+    const overlayEnv = overlay.env ?? {};
+    if (!isObject(overlayEnv)) throw new Error(`Endpoint settings env must be an object: ${overlayPath}`);
+    for (const key of Object.keys(overlayEnv)) delete childEnv[key];
+    return runClaude({ ...launch, args, settings: overlay });
   }
 
   if (profile.kind === "account") {

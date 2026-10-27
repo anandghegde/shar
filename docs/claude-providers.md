@@ -68,6 +68,12 @@ Beyond `foundry` and `subscription`, shar keeps a registry of named Claude profi
 shar claude add glm --surplus glm-5.3 --label "Surplus GLM 5.3"
 shar claude add sub2                                   # second subscription
 printf '%s' "$TOKEN" | shar claude add litellm --url https://llm.example.test --model gpt-x
+printf '%s' "$MODEL_API_KEY" | shar claude add wonder --url https://api.meta.ai --model muse-wonder-1.0 \
+  --env ANTHROPIC_DEFAULT_OPUS_MODEL=muse-wonder-1.0 \
+  --env ANTHROPIC_DEFAULT_SONNET_MODEL=muse-wonder-1.0 \
+  --env ANTHROPIC_DEFAULT_HAIKU_MODEL=muse-wonder-1.0 \
+  --env CLAUDE_CODE_SUBAGENT_MODEL=muse-wonder-1.0 \
+  --env ENABLE_TOOL_SEARCH=true --label "Muse Wonder"
 
 shar claude list
 shar claude glm -p "hello"                             # args pass through
@@ -82,7 +88,7 @@ Profile kinds:
 | `foundry` / `subscription` | built in | as described above |
 | `surplus` | `--surplus <model>` | `claude` against Surplus's Anthropic-compatible API (`https://api.surplusintelligence.ai/anthropic`), with `SURPLUS_API_KEY` as `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` blanked, and every model slot (main, small/fast, opus/sonnet/haiku, subagent) pinned to `<model>`. The key is read from the environment at launch and only written to the temporary `--settings` file. |
 | `account` | no flags | `claude` with `CLAUDE_CONFIG_DIR=~/.config/shar/claude/accounts/<name>` |
-| `endpoint` | `--url`, token on stdin | `claude --settings <name>.settings.json` (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, optional `ANTHROPIC_MODEL`), mode `0600` |
+| `endpoint` | `--url`, token on stdin | `claude --settings <name>.settings.json` (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, optional `ANTHROPIC_MODEL`, plus repeatable `--env KEY=VALUE`), mode `0600` |
 
 The names `setup`, `switch`, `add`, `list`, `pick`, `foundry` and `subscription` are reserved.
 

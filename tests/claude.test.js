@@ -580,3 +580,78 @@ test("account launch re-links a replaced settings.json and picks up new entries"
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /settings\.json.*shar-conflict/);
 });
+
+test("endpoint profiles store extra env and keep it authoritative at launch", async () => {
+  const { configDir, settingsPath } = await makeFixture();
+  await addClaudeProfile({
+    configDir,
+    name: "wonder",
+    kind: "endpoint",
+    url: "https://api.meta.ai",
+    token: "endpoint-token",
+    model: "muse-wonder-1.0",
+    extraEnv: {
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "muse-wonder-1.0",
+      CLAUDE_CODE_SUBAGENT_MODEL: "muse-wonder-1.0",
+      ENABLE_TOOL_SEARCH: "true"
+    }
+  });
+
+  const overlayPath = claudeEndpointSettingsPath(configDir, "wonder");
+  assert.deepEqual(JSON.parse(await readFile(overlayPath, "utf8")), {
+    env: {
+      ANTHROPIC_BASE_URL: "https://api.meta.ai",
+      ANTHROPIC_AUTH_TOKEN: "endpoint-token",
+      ANTHROPIC_MODEL: "muse-wonder-1.0",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "muse-wonder-1.0",
+      CLAUDE_CODE_SUBAGENT_MODEL: "muse-wonder-1.0",
+      ENABLE_TOOL_SEARCH: "true"
+    }
+  });
+
+  const recorder = spawnRecorder();
+  await launchClaudeProfile({
+    profile: await resolveClaudeProfile({ configDir, name: "wonder" }),
+    args: ["chat"],
+    configDir,
+    settingsPath,
+    env: {
+      SHAR_REAL_CLAUDE: "/test/bin/claude",
+      ANTHROPIC_AUTH_TOKEN: "shell-token",
+      CLAUDE_CODE_SUBAGENT_MODEL: "shell-model",
+      ENABLE_TOOL_SEARCH: "false",
+      KEEP_VALUE: "yes"
+    },
+    spawnProcess: recorder.spawnProcess
+  });
+
+  const [call] = recorder.calls;
+  assert.equal(call.args[0], "--settings");
+  assert.deepEqual(call.args.slice(2), ["chat"]);
+  assert.deepEqual(call.settings.env, {
+    ANTHROPIC_BASE_URL: "https://api.meta.ai",
+    ANTHROPIC_AUTH_TOKEN: "endpoint-token",
+    ANTHROPIC_MODEL: "muse-wonder-1.0",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "muse-wonder-1.0",
+    CLAUDE_CODE_SUBAGENT_MODEL: "muse-wonder-1.0",
+    ENABLE_TOOL_SEARCH: "true"
+  });
+  assert.equal(call.options.env.KEEP_VALUE, "yes");
+  assert.equal(call.options.env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(call.options.env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
+  assert.equal(call.options.env.ENABLE_TOOL_SEARCH, undefined);
+});
+
+test("endpoint profiles reject reserved and invalid extra env names", async () => {
+  const { configDir } = await makeFixture();
+  const base = { kind: "endpoint", url: "https://x.test", token: "t" };
+
+  await assert.rejects(
+    () => addClaudeProfile({ configDir, name: "a", ...base, extraEnv: { ANTHROPIC_MODEL: "x" } }),
+    /reserves ANTHROPIC_MODEL/
+  );
+  await assert.rejects(
+    () => addClaudeProfile({ configDir, name: "b", ...base, extraEnv: { "not a key": "x" } }),
+    /Invalid env var name/
+  );
+});

@@ -368,20 +368,29 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
   const usage = [
     "Usage: shar claude add <name> [--label <text>]",
     "       shar claude add <name> --surplus <model> [--label <text>]",
-    "       printf '%s' '<token>' | shar claude add <name> --url <url> [--model <model>] [--label <text>]"
+    "       printf '%s' '<token>' | shar claude add <name> --url <url> [--model <model>] [--env KEY=VALUE ...] [--label <text>]"
   ].join("\n");
 
   const [name, ...rest] = args;
   if (!name || rest.length % 2 !== 0) throw new Error(usage);
 
   const flags = {};
+  const extraEnv = {};
   for (let index = 0; index < rest.length; index += 2) {
     const flag = rest[index];
-    if (!["--label", "--surplus", "--url", "--model"].includes(flag)) throw new Error(usage);
-    flags[flag.slice(2)] = rest[index + 1];
+    if (!["--label", "--surplus", "--url", "--model", "--env"].includes(flag)) throw new Error(usage);
+    const value = rest[index + 1];
+    if (flag === "--env") {
+      const equals = value.indexOf("=");
+      if (equals <= 0) throw new Error(usage);
+      extraEnv[value.slice(0, equals)] = value.slice(equals + 1);
+    } else {
+      flags[flag.slice(2)] = value;
+    }
   }
-  if (flags.surplus && (flags.url || flags.model)) throw new Error(usage);
-  if (flags.model && !flags.url) throw new Error(usage);
+  const hasExtraEnv = Object.keys(extraEnv).length > 0;
+  if (flags.surplus && (flags.url || flags.model || hasExtraEnv)) throw new Error(usage);
+  if ((flags.model || hasExtraEnv) && !flags.url) throw new Error(usage);
 
   const configDir = store.paths.root;
   const label = flags.label;
@@ -398,6 +407,7 @@ async function addClaudeProfileCommand(store, args, settingsPath, io) {
       url: flags.url,
       model: flags.model,
       token,
+      extraEnv,
       label
     });
     io.stdout.write(`added ${name} (endpoint ${flags.url})\n`);
